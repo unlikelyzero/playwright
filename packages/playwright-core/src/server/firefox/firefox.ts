@@ -20,11 +20,13 @@ import fs from 'fs';
 import path from 'path';
 import { FFBrowser } from './ffBrowser';
 import { kBrowserCloseMessageId } from './ffConnection';
-import { BrowserType } from '../browserType';
-import { Env } from '../../utils/processLauncher';
-import { ConnectionTransport } from '../transport';
-import { BrowserOptions, PlaywrightOptions } from '../browser';
-import * as types from '../types';
+import { BrowserType, kNoXServerRunningError } from '../browserType';
+import type { Env } from '../../utils/processLauncher';
+import type { ConnectionTransport } from '../transport';
+import type { BrowserOptions, PlaywrightOptions } from '../browser';
+import type * as types from '../types';
+import { rewriteErrorMessage } from '../../utils/stackTrace';
+import { wrapInASCIIBox } from '../../utils';
 
 export class Firefox extends BrowserType {
   constructor(playwrightOptions: PlaywrightOptions) {
@@ -36,19 +38,14 @@ export class Firefox extends BrowserType {
   }
 
   _rewriteStartupError(error: Error): Error {
+    if (error.message.includes('no DISPLAY environment variable specified'))
+      return rewriteErrorMessage(error, '\n' + wrapInASCIIBox(kNoXServerRunningError, 1));
     return error;
   }
 
   _amendEnvironment(env: Env, userDataDir: string, executable: string, browserArguments: string[]): Env {
     if (!path.isAbsolute(os.homedir()))
       throw new Error(`Cannot launch Firefox with relative home directory. Did you set ${os.platform() === 'win32' ? 'USERPROFILE' : 'HOME'} to a relative path?`);
-    if (os.platform() === 'linux') {
-      return {
-        ...env,
-        // On linux Juggler ships the libstdc++ it was linked against.
-        LD_LIBRARY_PATH: `${path.dirname(executable)}:${process.env.LD_LIBRARY_PATH}`,
-      };
-    }
     return env;
   }
 
@@ -64,7 +61,7 @@ export class Firefox extends BrowserType {
       throw new Error('Pass userDataDir parameter to `browserType.launchPersistentContext(userDataDir, ...)` instead of specifying --profile argument');
     if (args.find(arg => arg.startsWith('-juggler')))
       throw new Error('Use the port parameter instead of -juggler argument');
-    const firefoxUserPrefs = isPersistent ? undefined : options.firefoxUserPrefs;
+    const firefoxUserPrefs = isPersistent ? undefined : { ...kBandaidFirefoxUserPrefs, ...options.firefoxUserPrefs };
     if (firefoxUserPrefs) {
       const lines: string[] = [];
       for (const [name, value] of Object.entries(firefoxUserPrefs))
@@ -88,3 +85,9 @@ export class Firefox extends BrowserType {
     return firefoxArguments;
   }
 }
+
+// Prefs for quick fixes that didn't make it to the build.
+// Should all be moved to `playwright.cfg`.
+const kBandaidFirefoxUserPrefs = {
+  'network.cookie.cookieBehavior': 4,
+};

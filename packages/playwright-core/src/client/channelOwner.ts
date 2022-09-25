@@ -15,13 +15,14 @@
  */
 
 import { EventEmitter } from 'events';
-import * as channels from '../protocol/channels';
-import { createScheme, ValidationError, Validator } from '../protocol/validator';
-import { debugLogger } from '../utils/debugLogger';
-import { captureRawStack, captureStackTrace, ParsedStackTrace } from '../utils/stackTrace';
-import { isUnderTest } from '../utils/utils';
+import type * as channels from '@protocol/channels';
+import { maybeFindValidator, ValidationError, type ValidatorContext } from '../protocol/validator';
+import { debugLogger } from '../common/debugLogger';
+import type { ParsedStackTrace } from '../utils/stackTrace';
+import { captureRawStack, captureStackTrace } from '../utils/stackTrace';
+import { isUnderTest } from '../utils';
 import { zones } from '../utils/zones';
-import { ClientInstrumentation } from './clientInstrumentation';
+import type { ClientInstrumentation } from './clientInstrumentation';
 import type { Connection } from './connection';
 import type { Logger } from './types';
 
@@ -56,6 +57,12 @@ export abstract class ChannelOwner<T extends channels.Channel = channels.Channel
     this._initializer = initializer;
   }
 
+  _adopt(child: ChannelOwner<any>) {
+    child._parent!._objects.delete(child._guid);
+    this._objects.set(child._guid, child);
+    child._parent = this;
+  }
+
   _dispose() {
     // Clean up from parent and connection.
     if (this._parent)
@@ -78,10 +85,8 @@ export abstract class ChannelOwner<T extends channels.Channel = channels.Channel
   private _createChannel(base: Object): T {
     const channel = new Proxy(base, {
       get: (obj: any, prop) => {
-        if (prop === 'debugScopeState')
-          return (params: any) => this._connection.sendMessageToServer(this, prop, params, null);
         if (typeof prop === 'string') {
-          const validator = scheme[paramsName(this._type, prop)];
+          const validator = maybeFindValidator(this._type, prop, 'Params');
           if (validator) {
             return (params: any) => {
               return this._wrapApiCall(apiZone => {
@@ -89,7 +94,7 @@ export abstract class ChannelOwner<T extends channels.Channel = channels.Channel
                 apiZone.reported = true;
                 if (csi && stackTrace && stackTrace.apiName)
                   csi.onApiCallBegin(renderCallWithParams(stackTrace.apiName, params), stackTrace, callCookie);
-                return this._connection.sendMessageToServer(this, prop, validator(params, ''), stackTrace);
+                return this._connection.sendMessageToServer(this, this._type, prop, validator(params, '', { tChannelImpl: tChannelImplToWire, binary: this._connection.isRemote() ? 'toBase64' : 'buffer' }), stackTrace);
               });
             };
           }
@@ -135,6 +140,10 @@ export abstract class ChannelOwner<T extends channels.Channel = channels.Channel
     }
   }
 
+  _toImpl(): any {
+    return this._connection.toImpl?.(this);
+  }
+
   private toJSON() {
     // Jest's expect library tries to print objects sometimes.
     // RPC objects can contain links to lots of other objects,
@@ -155,12 +164,8 @@ function logApiCall(logger: Logger | undefined, message: string, isNested: boole
   debugLogger.log('api', message);
 }
 
-function paramsName(type: string, method: string) {
-  return type + method[0].toUpperCase() + method.substring(1) + 'Params';
-}
-
 const paramsToRender = ['url', 'selector', 'text', 'key'];
-export function renderCallWithParams(apiName: string, params: any) {
+function renderCallWithParams(apiName: string, params: any) {
   const paramsArray = [];
   if (params) {
     for (const name of paramsToRender) {
@@ -172,15 +177,11 @@ export function renderCallWithParams(apiName: string, params: any) {
   return apiName + paramsText;
 }
 
-const tChannel = (name: string): Validator => {
-  return (arg: any, path: string) => {
-    if (arg._object instanceof ChannelOwner && (name === '*' || arg._object._type === name))
-      return { guid: arg._object._guid };
-    throw new ValidationError(`${path}: expected ${name}`);
-  };
-};
-
-const scheme = createScheme(tChannel);
+function tChannelImplToWire(names: '*' | string[], arg: any, path: string, context: ValidatorContext) {
+  if (arg._object instanceof ChannelOwner && (names === '*' || names.includes(arg._object._type)))
+    return { guid: arg._object._guid };
+  throw new ValidationError(`${path}: expected channel ${names.toString()}`);
+}
 
 type ApiZone = {
   stackTrace: ParsedStackTrace;

@@ -14,28 +14,36 @@
  * limitations under the License.
  */
 
-import { EventEmitter } from 'events';
+import type { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import yazl from 'yazl';
-import { NameValue } from '../../../common/types';
-import { commandsWithTracingSnapshots, TracingTracingStopChunkParams } from '../../../protocol/channels';
-import { ManualPromise } from '../../../utils/async';
-import { eventsHelper, RegisteredListener } from '../../../utils/eventsHelper';
-import { assert, calculateSha1, createGuid, mkdirIfNeeded, monotonicTime, removeFolders } from '../../../utils/utils';
+import type { NameValue } from '../../../common/types';
+import type { TracingTracingStopChunkParams } from '@protocol/channels';
+import { commandsWithTracingSnapshots } from '../../../protocol/debug';
+import { ManualPromise } from '../../../utils/manualPromise';
+import type { RegisteredListener } from '../../../utils/eventsHelper';
+import { eventsHelper } from '../../../utils/eventsHelper';
+import { assert, calculateSha1, createGuid, monotonicTime } from '../../../utils';
+import { mkdirIfNeeded, removeFolders } from '../../../utils/fileUtils';
 import { Artifact } from '../../artifact';
 import { BrowserContext } from '../../browserContext';
 import { ElementHandle } from '../../dom';
-import { APIRequestContext } from '../../fetch';
-import { CallMetadata, InstrumentationListener, SdkObject } from '../../instrumentation';
+import type { APIRequestContext } from '../../fetch';
+import type { CallMetadata, InstrumentationListener } from '../../instrumentation';
+import { SdkObject } from '../../instrumentation';
 import { Page } from '../../page';
-import * as har from '../../supplements/har/har';
-import { HarTracer, HarTracerDelegate } from '../../supplements/har/harTracer';
-import { FrameSnapshot } from '../common/snapshotTypes';
-import * as trace from '../common/traceEvents';
-import { VERSION } from '../common/traceEvents';
-import { Snapshotter, SnapshotterBlob, SnapshotterDelegate } from './snapshotter';
+import type * as har from '@trace/har';
+import type { HarTracerDelegate } from '../../har/harTracer';
+import { HarTracer } from '../../har/harTracer';
+import type { FrameSnapshot } from '@trace/snapshot';
+import type * as trace from '@trace/trace';
+import type { VERSION } from '@trace/trace';
+import type { SnapshotterBlob, SnapshotterDelegate } from './snapshotter';
+import { Snapshotter } from './snapshotter';
+import { yazl } from '../../../zipBundle';
+
+const version: VERSION = 3;
 
 export type TracerOptions = {
   name?: string;
@@ -61,10 +69,6 @@ type RecordingState = {
 const kScreencastOptions = { width: 800, height: 600, quality: 90 };
 
 export class Tracing extends SdkObject implements InstrumentationListener, SnapshotterDelegate, HarTracerDelegate {
-  static Events = {
-    Dispose: 'dispose',
-  };
-
   private _writeChain = Promise.resolve();
   private _snapshotter?: Snapshotter;
   private _harTracer: HarTracer;
@@ -79,16 +83,18 @@ export class Tracing extends SdkObject implements InstrumentationListener, Snaps
   private _contextCreatedEvent: trace.ContextCreatedTraceEvent;
 
   constructor(context: BrowserContext | APIRequestContext, tracesDir: string | undefined) {
-    super(context, 'Tracing');
+    super(context, 'tracing');
     this._context = context;
     this._precreatedTracesDir = tracesDir;
-    this._harTracer = new HarTracer(context, this, {
-      content: 'sha1',
+    this._harTracer = new HarTracer(context, null, this, {
+      content: 'attach',
+      includeTraceInfo: true,
+      recordRequestOverrides: false,
       waitForContentOnStop: false,
       skipScripts: true,
     });
     this._contextCreatedEvent = {
-      version: VERSION,
+      version,
       type: 'context-options',
       browserName: '',
       options: {},
@@ -197,14 +203,10 @@ export class Tracing extends SdkObject implements InstrumentationListener, Snaps
     return this._tracesTmpDir;
   }
 
-  async flush() {
-    this._snapshotter?.dispose();
-    await this._writeChain;
-  }
-
   async dispose() {
     this._snapshotter?.dispose();
-    this.emit(Tracing.Events.Dispose);
+    this._harTracer.stop();
+    await this._writeChain;
   }
 
   async stopChunk(params: TracingTracingStopChunkParams): Promise<{ artifact: Artifact | null, sourceEntries: NameValue[] | undefined }> {
@@ -385,10 +387,9 @@ export class Tracing extends SdkObject implements InstrumentationListener, Snaps
   private _startScreencastInPage(page: Page) {
     page.setScreencastOptions(kScreencastOptions);
     const prefix = page.guid;
-    let frameSeq = 0;
     this._screencastListeners.push(
         eventsHelper.addEventListener(page, Page.Events.ScreencastFrame, params => {
-          const suffix = String(++frameSeq).padStart(10, '0');
+          const suffix = params.timestamp || Date.now();
           const sha1 = `${prefix}-${suffix}.jpeg`;
           const event: trace.ScreencastFrameTraceEvent = {
             type: 'screencast-frame',

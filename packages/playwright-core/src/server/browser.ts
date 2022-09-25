@@ -14,16 +14,18 @@
  * limitations under the License.
  */
 
-import * as types from './types';
-import { BrowserContext } from './browserContext';
+import type * as types from './types';
+import type * as channels from '@protocol/channels';
+import { BrowserContext, validateBrowserContextOptions } from './browserContext';
 import { Page } from './page';
 import { Download } from './download';
-import { ProxySettings } from './types';
-import { ChildProcess } from 'child_process';
-import { RecentLogsCollector } from '../utils/debugLogger';
+import type { ProxySettings } from './types';
+import type { ChildProcess } from 'child_process';
+import type { RecentLogsCollector } from '../common/debugLogger';
+import type { CallMetadata } from './instrumentation';
 import { SdkObject } from './instrumentation';
 import { Artifact } from './artifact';
-import { Selectors } from './selectors';
+import type { Selectors } from './selectors';
 
 export interface BrowserProcess {
   onclose?: ((exitCode: number | null, signal: string | null) => void);
@@ -47,7 +49,7 @@ export type BrowserOptions = PlaywrightOptions & {
   downloadsPath: string,
   tracesDir: string,
   headful?: boolean,
-  persistent?: types.BrowserContextOptions,  // Undefined means no persistent context.
+  persistent?: channels.BrowserNewContextParams,  // Undefined means no persistent context.
   browserProcess: BrowserProcess,
   customExecutablePath?: string;
   proxy?: ProxySettings,
@@ -55,6 +57,7 @@ export type BrowserOptions = PlaywrightOptions & {
   browserLogsCollector: RecentLogsCollector,
   slowMo?: number;
   wsEndpoint?: string;  // Only there when connected over web socket.
+  originalLaunchOptions: types.LaunchOptions;
 };
 
 export abstract class Browser extends SdkObject {
@@ -67,18 +70,43 @@ export abstract class Browser extends SdkObject {
   _defaultContext: BrowserContext | null = null;
   private _startedClosing = false;
   readonly _idToVideo = new Map<string, { context: BrowserContext, artifact: Artifact }>();
+  private _contextForReuse: { context: BrowserContext, hash: string } | undefined;
 
   constructor(options: BrowserOptions) {
     super(options.rootSdkObject, 'browser');
     this.attribution.browser = this;
     this.options = options;
+    this.instrumentation.onBrowserOpen(this);
   }
 
-  abstract newContext(options: types.BrowserContextOptions): Promise<BrowserContext>;
+  abstract doCreateNewContext(options: channels.BrowserNewContextParams): Promise<BrowserContext>;
   abstract contexts(): BrowserContext[];
   abstract isConnected(): boolean;
   abstract version(): string;
   abstract userAgent(): string;
+
+  async newContext(metadata: CallMetadata, options: channels.BrowserNewContextParams): Promise<BrowserContext> {
+    validateBrowserContextOptions(options, this.options);
+    const context = await this.doCreateNewContext(options);
+    if (options.storageState)
+      await context.setStorageState(metadata, options.storageState);
+    return context;
+  }
+
+  async newContextForReuse(params: channels.BrowserNewContextForReuseParams, metadata: CallMetadata): Promise<{ context: BrowserContext, needsReset: boolean }> {
+    const hash = BrowserContext.reusableContextHash(params);
+    for (const context of this.contexts()) {
+      if (context !== this._contextForReuse?.context)
+        await context.close(metadata);
+    }
+    if (!this._contextForReuse || hash !== this._contextForReuse.hash || !this._contextForReuse.context.canResetForReuse()) {
+      if (this._contextForReuse)
+        await this._contextForReuse.context.close(metadata);
+      this._contextForReuse = { context: await this.newContext(metadata, params), hash };
+      return { context: this._contextForReuse.context, needsReset: false };
+    }
+    return { context: this._contextForReuse.context, needsReset: true };
+  }
 
   _downloadCreated(page: Page, uuid: string, url: string, suggestedFilename?: string) {
     const download = new Download(page, this.options.downloadsPath || '', uuid, url, suggestedFilename);
@@ -124,6 +152,7 @@ export abstract class Browser extends SdkObject {
     if (this._defaultContext)
       this._defaultContext._browserClosed();
     this.emit(Browser.Events.Disconnected);
+    this.instrumentation.onBrowserClose(this);
   }
 
   async close() {

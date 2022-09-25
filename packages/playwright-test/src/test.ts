@@ -15,10 +15,9 @@
  */
 
 import type { FixturePool } from './fixtures';
-import * as reporterTypes from '../types/testReporter';
+import type * as reporterTypes from '../types/testReporter';
 import type { TestTypeImpl } from './testType';
-import { Annotation, FixturesWithLocation, Location } from './types';
-import { FullProject } from './types';
+import type { Annotation, FixturesWithLocation, FullProject, FullProjectInternal, Location } from './types';
 
 class Base {
   title: string;
@@ -43,15 +42,22 @@ export class Suite extends Base implements reporterTypes.Suite {
   location?: Location;
   parent?: Suite;
   _use: FixturesWithLocation[] = [];
-  _isDescribe = false;
+  _skipped = false;
   _entries: (Suite | TestCase)[] = [];
   _hooks: { type: 'beforeEach' | 'afterEach' | 'beforeAll' | 'afterAll', fn: Function, location: Location }[] = [];
   _timeout: number | undefined;
   _annotations: Annotation[] = [];
   _modifiers: Modifier[] = [];
   _parallelMode: 'default' | 'serial' | 'parallel' = 'default';
-  _projectConfig: FullProject | undefined;
+  _projectConfig: FullProjectInternal | undefined;
   _loadError?: reporterTypes.TestError;
+  _fileId: string | undefined;
+  readonly _type: 'root' | 'project' | 'file' | 'describe';
+
+  constructor(title: string, type: 'root' | 'project' | 'file' | 'describe') {
+    super(title);
+    this._type = type;
+  }
 
   _addTest(test: TestCase) {
     test.parent = this;
@@ -81,7 +87,9 @@ export class Suite extends Base implements reporterTypes.Suite {
 
   titlePath(): string[] {
     const titlePath = this.parent ? this.parent.titlePath() : [];
-    titlePath.push(this.title);
+    // Ignore anonymous describe blocks.
+    if (this.title || this._type !== 'describe')
+      titlePath.push(this.title);
     return titlePath;
   }
 
@@ -96,7 +104,7 @@ export class Suite extends Base implements reporterTypes.Suite {
   }
 
   _clone(): Suite {
-    const suite = new Suite(this.title);
+    const suite = new Suite(this.title, this._type);
     suite._only = this._only;
     suite.location = this.location;
     suite._requireFile = this._requireFile;
@@ -105,9 +113,9 @@ export class Suite extends Base implements reporterTypes.Suite {
     suite._timeout = this._timeout;
     suite._annotations = this._annotations.slice();
     suite._modifiers = this._modifiers.slice();
-    suite._isDescribe = this._isDescribe;
     suite._parallelMode = this._parallelMode;
     suite._projectConfig = this._projectConfig;
+    suite._skipped = this._skipped;
     return suite;
   }
 
@@ -129,10 +137,13 @@ export class TestCase extends Base implements reporterTypes.TestCase {
   repeatEachIndex = 0;
 
   _testType: TestTypeImpl;
-  _id = '';
+  id = '';
   _workerHash = '';
   _pool: FixturePool | undefined;
-  _projectIndex = 0;
+  _projectId = '';
+  // Annotations that are not added from within a test (like fixme and skip), should not
+  // be re-added each time we retry a test.
+  _alreadyInheritedAnnotations: boolean = false;
 
   constructor(title: string, fn: Function, testType: TestTypeImpl, location: Location) {
     super(title);
@@ -148,7 +159,7 @@ export class TestCase extends Base implements reporterTypes.TestCase {
   }
 
   outcome(): 'skipped' | 'expected' | 'unexpected' | 'flaky' {
-    const nonSkipped = this.results.filter(result => result.status !== 'skipped');
+    const nonSkipped = this.results.filter(result => result.status !== 'skipped' && result.status !== 'interrupted');
     if (!nonSkipped.length)
       return 'skipped';
     if (nonSkipped.every(result => result.status === this.expectedStatus))
@@ -168,13 +179,24 @@ export class TestCase extends Base implements reporterTypes.TestCase {
     test._only = this._only;
     test._requireFile = this._requireFile;
     test.expectedStatus = this.expectedStatus;
+    test.annotations = this.annotations.slice();
+    test._annotateWithInheritence = this._annotateWithInheritence;
     return test;
+  }
+
+  _annotateWithInheritence(annotations: Annotation[]) {
+    if (this._alreadyInheritedAnnotations) {
+      this.annotations = annotations;
+    } else {
+      this._alreadyInheritedAnnotations = true;
+      this.annotations = [...this.annotations, ...annotations];
+    }
   }
 
   _appendTestResult(): reporterTypes.TestResult {
     const result: reporterTypes.TestResult = {
       retry: this.results.length,
-      workerIndex: 0,
+      workerIndex: -1,
       duration: 0,
       startTime: new Date(),
       stdout: [],

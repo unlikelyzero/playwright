@@ -1,0 +1,7 @@
+[*]
+../client/
+../common/
+../server/
+../server/dispatchers/
+../utils/
+../utilsBundle.ts

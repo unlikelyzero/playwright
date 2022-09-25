@@ -15,20 +15,18 @@
  */
 
 import fs from 'fs';
-import * as mime from 'mime';
 import path from 'path';
-import { calculateSha1 } from 'playwright-core/lib/utils/utils';
-import type { FullConfig, FullProject, TestError, TestInfo, TestStatus } from '../types/test';
-import { WorkerInitParams } from './ipc';
-import { Loader } from './loader';
-import { ProjectImpl } from './project';
-import { TestCase } from './test';
+import type { TestError, TestInfo, TestStatus } from '../types/test';
+import type { FullConfigInternal, FullProjectInternal } from './types';
+import type { WorkerInitParams } from './ipc';
+import type { Loader } from './loader';
+import type { TestCase } from './test';
 import { TimeoutManager } from './timeoutManager';
-import { Annotation, TestStepInternal } from './types';
-import { addSuffixToFilePath, getContainedPath, monotonicTime, sanitizeForFilePath, serializeError, trimLongString } from './util';
+import type { Annotation, TestStepInternal } from './types';
+import { addSuffixToFilePath, getContainedPath, normalizeAndSaveAttachment, sanitizeForFilePath, serializeError, trimLongString } from './util';
+import { monotonicTime } from 'playwright-core/lib/utils';
 
 export class TestInfoImpl implements TestInfo {
-  private _projectImpl: ProjectImpl;
   private _addStepImpl: (data: Omit<TestStepInternal, 'complete'>) => TestStepInternal;
   readonly _test: TestCase;
   readonly _timeoutManager: TimeoutManager;
@@ -36,14 +34,15 @@ export class TestInfoImpl implements TestInfo {
   readonly _startWallTime: number;
   private _hasHardError: boolean = false;
   readonly _screenshotsDir: string;
+  readonly _onTestFailureImmediateCallbacks = new Map<() => Promise<void>, string>(); // fn -> title
 
   // ------------ TestInfo fields ------------
   readonly repeatEachIndex: number;
   readonly retry: number;
   readonly workerIndex: number;
   readonly parallelIndex: number;
-  readonly project: FullProject;
-  config: FullConfig;
+  readonly project: FullProjectInternal;
+  config: FullConfigInternal;
   readonly title: string;
   readonly titlePath: string[];
   readonly file: string;
@@ -61,6 +60,7 @@ export class TestInfoImpl implements TestInfo {
   readonly outputDir: string;
   readonly snapshotDir: string;
   errors: TestError[] = [];
+  currentStep: TestStepInternal | undefined;
 
   get error(): TestError | undefined {
     return this.errors.length > 0 ? this.errors[0] : undefined;
@@ -76,7 +76,7 @@ export class TestInfoImpl implements TestInfo {
   }
 
   get timeout(): number {
-    return this._timeoutManager.defaultTimeout();
+    return this._timeoutManager.defaultSlotTimings().timeout;
   }
 
   set timeout(timeout: number) {
@@ -85,12 +85,12 @@ export class TestInfoImpl implements TestInfo {
 
   constructor(
     loader: Loader,
+    project: FullProjectInternal,
     workerParams: WorkerInitParams,
     test: TestCase,
     retry: number,
     addStepImpl: (data: Omit<TestStepInternal, 'complete'>) => TestStepInternal,
   ) {
-    this._projectImpl = loader.projects()[workerParams.projectIndex];
     this._test = test;
     this._addStepImpl = addStepImpl;
     this._startTime = monotonicTime();
@@ -100,7 +100,7 @@ export class TestInfoImpl implements TestInfo {
     this.retry = retry;
     this.workerIndex = workerParams.workerIndex;
     this.parallelIndex =  workerParams.parallelIndex;
-    this.project = this._projectImpl.config;
+    this.project = project;
     this.config = loader.fullConfig();
     this.title = test.title;
     this.titlePath = test.titlePath();
@@ -113,20 +113,13 @@ export class TestInfoImpl implements TestInfo {
     this._timeoutManager = new TimeoutManager(this.project.timeout);
 
     this.outputDir = (() => {
-      const sameName = loader.projects().filter(project => project.config.name === this.project.name);
-      let uniqueProjectNamePathSegment: string;
-      if (sameName.length > 1)
-        uniqueProjectNamePathSegment = this.project.name + (sameName.indexOf(this._projectImpl) + 1);
-      else
-        uniqueProjectNamePathSegment = this.project.name;
-
       const relativeTestFilePath = path.relative(this.project.testDir, test._requireFile.replace(/\.(spec|test)\.(js|ts|mjs)$/, ''));
       const sanitizedRelativePath = relativeTestFilePath.replace(process.platform === 'win32' ? new RegExp('\\\\', 'g') : new RegExp('/', 'g'), '-');
       const fullTitleWithoutSpec = test.titlePath().slice(1).join(' ');
 
       let testOutputDir = trimLongString(sanitizedRelativePath + '-' + sanitizeForFilePath(fullTitleWithoutSpec));
-      if (uniqueProjectNamePathSegment)
-        testOutputDir += '-' + sanitizeForFilePath(uniqueProjectNamePathSegment);
+      if (project.id)
+        testOutputDir += '-' + sanitizeForFilePath(project.id);
       if (this.retry)
         testOutputDir += '-retry' + this.retry;
       if (this.repeatEachIndex)
@@ -140,7 +133,7 @@ export class TestInfoImpl implements TestInfo {
     })();
     this._screenshotsDir = (() => {
       const relativeTestFilePath = path.relative(this.project.testDir, test._requireFile);
-      return path.join(this.project.screenshotsDir, relativeTestFilePath);
+      return path.join(this.project._screenshotsDir, relativeTestFilePath);
     })();
   }
 
@@ -174,11 +167,11 @@ export class TestInfoImpl implements TestInfo {
   async _runWithTimeout(cb: () => Promise<any>): Promise<void> {
     const timeoutError = await this._timeoutManager.runWithTimeout(cb);
     // Do not overwrite existing failure upon hook/teardown timeout.
-    if (timeoutError && this.status === 'passed') {
+    if (timeoutError && (this.status === 'passed' || this.status === 'skipped')) {
       this.status = 'timedOut';
       this.errors.push(timeoutError);
     }
-    this.duration = monotonicTime() - this._startTime;
+    this.duration = this._timeoutManager.defaultSlotTimings().elapsed | 0;
   }
 
   async _runFn(fn: Function, skips?: 'allowSkips'): Promise<TestError | undefined> {
@@ -209,7 +202,7 @@ export class TestInfoImpl implements TestInfo {
       return;
     if (isHardError)
       this._hasHardError = true;
-    if (this.status === 'passed')
+    if (this.status === 'passed' || this.status === 'skipped')
       this.status = 'failed';
     this.errors.push(error);
   }
@@ -218,30 +211,22 @@ export class TestInfoImpl implements TestInfo {
     const step = this._addStep(stepInfo);
     try {
       const result = await cb();
-      step.complete();
+      step.complete({});
       return result;
     } catch (e) {
-      step.complete(e instanceof SkipError ? undefined : serializeError(e));
+      step.complete({ error: e instanceof SkipError ? undefined : serializeError(e) });
       throw e;
     }
+  }
+
+  _isFailure() {
+    return this.status !== 'skipped' && this.status !== this.expectedStatus;
   }
 
   // ------------ TestInfo methods ------------
 
   async attach(name: string, options: { path?: string, body?: string | Buffer, contentType?: string } = {}) {
-    if ((options.path !== undefined ? 1 : 0) + (options.body !== undefined ? 1 : 0) !== 1)
-      throw new Error(`Exactly one of "path" and "body" must be specified`);
-    if (options.path !== undefined) {
-      const hash = calculateSha1(options.path);
-      const dest = this.outputPath('attachments', hash + path.extname(options.path));
-      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-      await fs.promises.copyFile(options.path, dest);
-      const contentType = options.contentType ?? (mime.getType(path.basename(options.path)) || 'application/octet-stream');
-      this.attachments.push({ name, contentType, path: dest });
-    } else {
-      const contentType = options.contentType ?? (typeof options.body === 'string' ? 'text/plain' : 'application/octet-stream');
-      this.attachments.push({ name, contentType, body: typeof options.body === 'string' ? Buffer.from(options.body) : options.body });
-    }
+    this.attachments.push(await normalizeAndSaveAttachment(this.outputPath(), name, options));
   }
 
   outputPath(...pathSegments: string[]){
@@ -298,4 +283,3 @@ export class TestInfoImpl implements TestInfo {
 
 class SkipError extends Error {
 }
-

@@ -10,5 +10,12 @@ setTimeout(() => {
     server.setRoute('/env-FOO', (message, response) => {
       response.end(process.env.FOO);
     });
+    server.setRoute('/port', (_, response) => {
+      response.end('' + server.PORT);
+    });
+    server.setRoute('/redirect', (_, response) => {
+      response.writeHead(301, 'Moved');
+      response.end();
+    });
   });
-}, 750);
+}, process.argv[3] ? +process.argv[3] : 0);

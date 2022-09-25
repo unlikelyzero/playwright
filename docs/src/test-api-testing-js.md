@@ -29,9 +29,9 @@ The following example demonstrates how to use Playwright to test issues creation
 
 GitHub API requires authorization, so we'll configure the token once for all tests. While at it, we'll also set the `baseURL` to simplify the tests. You can either put them in the configuration file, or in the test file with `test.use()`.
 
-```js js-flavor=ts
+```js tab=js-ts
 // playwright.config.ts
-import { PlaywrightTestConfig } from '@playwright/test';
+import type { PlaywrightTestConfig } from '@playwright/test';
 
 const config: PlaywrightTestConfig = {
   use: {
@@ -49,7 +49,7 @@ const config: PlaywrightTestConfig = {
 export default config;
 ```
 
-```js js-flavor=js
+```js tab=js-js
 // playwright.config.js
 // @ts-check
 /** @type {import('@playwright/test').PlaywrightTestConfig} */
@@ -182,7 +182,7 @@ While running tests inside browsers you may want to make calls to the HTTP API o
 The following test creates a new issue via API and then navigates to the list of all issues in the
 project to check that it appears at the top of the list.
 
-```js js-flavor=ts
+```js tab=js-ts
 import { test, expect } from '@playwright/test';
 
 const REPO = 'test-repo-1';
@@ -224,7 +224,7 @@ test('last created issue should be first in the list', async ({ page }) => {
 });
 ```
 
-```js js-flavor=js
+```js tab=js-js
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
@@ -272,7 +272,7 @@ test('last created issue should be first in the list', async ({ page }) => {
 The following test creates a new issue via user interface in the browser and then uses checks if
 it was created via API:
 
-```js js-flavor=ts
+```js tab=js-ts
 import { test, expect } from '@playwright/test';
 
 const REPO = 'test-repo-1';
@@ -302,10 +302,10 @@ test.afterAll(async ({ }) => {
 
 test('last created issue should be on the server', async ({ page, request }) => {
   await page.goto(`https://github.com/${USER}/${REPO}/issues`);
-  await page.click('text=New Issue');
-  await page.fill('[aria-label="Title"]', 'Bug report 1');
-  await page.fill('[aria-label="Comment body"]', 'Bug description');
-  await page.click('text=Submit new issue');
+  await page.locator('text=New Issue').click();
+  await page.locator('[aria-label="Title"]').fill('Bug report 1');
+  await page.locator('[aria-label="Comment body"]').fill('Bug description');
+  await page.locator('text=Submit new issue').click();
   const issueId = page.url().substr(page.url().lastIndexOf('/'));
 
   const newIssue = await request.get(`https://api.github.com/repos/${USER}/${REPO}/issues/${issueId}`);
@@ -316,7 +316,7 @@ test('last created issue should be on the server', async ({ page, request }) => 
 });
 ```
 
-```js js-flavor=js
+```js tab=js-js
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
@@ -347,10 +347,10 @@ test.afterAll(async ({ }) => {
 
 test('last created issue should be on the server', async ({ page, request }) => {
   await page.goto(`https://github.com/${USER}/${REPO}/issues`);
-  await page.click('text=New Issue');
-  await page.fill('[aria-label="Title"]', 'Bug report 1');
-  await page.fill('[aria-label="Comment body"]', 'Bug description');
-  await page.click('text=Submit new issue');
+  await page.locator('text=New Issue').click();
+  await page.locator('[aria-label="Title"]').fill('Bug report 1');
+  await page.locator('[aria-label="Comment body"]').fill('Bug description');
+  await page.locator('text=Submit new issue').click();
   const issueId = page.url().substr(page.url().lastIndexOf('/'));
 
   const newIssue = await request.get(`https://api.github.com/repos/${USER}/${REPO}/issues/${issueId}`);
@@ -386,4 +386,74 @@ await requestContext.storageState({ path: 'state.json' });
 
 // Create a new context with the saved storage state.
 const context = await browser.newContext({ storageState: 'state.json' });
+```
+
+## Context request vs global request
+
+There are two types of [APIRequestContext]:
+* associated with a [BrowserContext]
+* isolated instance, created via [`method: APIRequest.newContext`]
+
+The main difference is that [APIRequestContext] accessible via [`property: BrowserContext.request`] and
+[`property: Page.request`] will populate request's `Cookie` header from the browser context and will
+automatically update browser cookies if [APIResponse] has `Set-Cookie` header:
+
+```js
+test('context request will share cookie storage with its browser context', async ({ page, context }) => {
+  await context.route('https://www.github.com/', async (route) => {
+    // Send an API request that shares cookie storage with the browser context.
+    const response = await context.request.fetch(route.request());
+    const responseHeaders = response.headers();
+
+    // The response will have 'Set-Cookie' header.
+    const responseCookies = new Map(responseHeaders['set-cookie'].split('\n').map(c => c.split(';', 2)[0].split('=')));
+    // The response will have 3 cookies in 'Set-Cookie' header.
+    expect(responseCookies.size).toBe(3);
+    const contextCookies = await context.cookies();
+    // The browser context will already contain all the cookies from the API response.
+    expect(new Map(contextCookies.map(({name, value}) => [name, value]))).toEqual(responseCookies);
+
+    route.fulfill({
+      response,
+      headers: {...responseHeaders, foo: 'bar'},
+    });
+  });
+  await page.goto('https://www.github.com/');
+});
+```
+
+If you don't want [APIRequestContext] to use and update cookies from the browser context, you can manually
+create a new instance of [APIRequestContext] which will have its own isolated cookies:
+
+```js
+test('global context request has isolated cookie storage', async ({ page, context, browser, playwright }) => {
+  // Create a new instance of APIRequestContext with isolated cookie storage.
+  const request = await playwright.request.newContext();
+  await context.route('https://www.github.com/', async (route) => {
+    const response = await request.fetch(route.request());
+    const responseHeaders = response.headers();
+
+    const responseCookies = new Map(responseHeaders['set-cookie'].split('\n').map(c => c.split(';', 2)[0].split('=')));
+    // The response will have 3 cookies in 'Set-Cookie' header.
+    expect(responseCookies.size).toBe(3);
+    const contextCookies = await context.cookies();
+    // The browser context will not have any cookies from the isolated API request.
+    expect(contextCookies.length).toBe(0);
+
+    // Manually export cookie storage.
+    const storageState = await request.storageState();
+    // Create a new context and initialize it with the cookies from the global request.
+    const browserContext2 = await browser.newContext({ storageState });
+    const contextCookies2 = await browserContext2.cookies();
+    // The new browser context will already contain all the cookies from the API response.
+    expect(new Map(contextCookies2.map(({name, value}) => [name, value]))).toEqual(responseCookies);
+
+    route.fulfill({
+      response,
+      headers: {...responseHeaders, foo: 'bar'},
+    });
+  });
+  await page.goto('https://www.github.com/');
+  await request.dispose();
+});
 ```

@@ -15,10 +15,11 @@
  */
 
 
-import type { ExpectedTextValue } from 'playwright-core/lib/protocol/channels';
-import { isRegExp, isString } from 'playwright-core/lib/utils/utils';
+import type { ExpectedTextValue } from '@protocol/channels';
+import { isRegExp, isString } from 'playwright-core/lib/utils';
 import type { Expect } from '../types';
-import { expectTypes, callLogText, currentExpectTimeout, captureStackTrace, ParsedStackTrace } from '../util';
+import type { ParsedStackTrace } from '../util';
+import { expectTypes, callLogText, currentExpectTimeout, captureStackTrace } from '../util';
 import {
   printReceivedStringContainExpectedResult,
   printReceivedStringContainExpectedSubstring
@@ -100,12 +101,13 @@ export async function toMatchText(
   return { message, pass };
 }
 
-export function toExpectedTextValues(items: (string | RegExp)[], options: { matchSubstring?: boolean, normalizeWhiteSpace?: boolean } = {}): ExpectedTextValue[] {
+export function toExpectedTextValues(items: (string | RegExp)[], options: { matchSubstring?: boolean, normalizeWhiteSpace?: boolean, ignoreCase?: boolean } = {}): ExpectedTextValue[] {
   return items.map(i => ({
     string: isString(i) ? i : undefined,
     regexSource: isRegExp(i) ? i.source : undefined,
     regexFlags: isRegExp(i) ? i.flags : undefined,
     matchSubstring: options.matchSubstring,
+    ignoreCase: options.ignoreCase,
     normalizeWhiteSpace: options.normalizeWhiteSpace,
   }));
 }

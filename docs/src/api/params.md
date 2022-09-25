@@ -27,7 +27,7 @@ value can be changed by using the [`method: BrowserContext.setDefaultTimeout`].
 - `strict` <[boolean]>
 
 When true, the call requires selector to resolve to a single element. If given selector resolves to more
-then one element, the call throws an exception.
+than one element, the call throws an exception.
 
 ## input-timeout
 - `timeout` <[float]>
@@ -46,23 +46,25 @@ to inaccessible pages. Defaults to `false`.
 ## input-force
 - `force` <[boolean]>
 
-Whether to bypass the [actionability](./actionability.md) checks. Defaults to `false`.
+Whether to bypass the [actionability](../actionability.md) checks. Defaults to `false`.
 
 ## input-selector
 - `selector` <[string]>
 
 A selector to search for an element. If there are multiple elements satisfying the selector, the first will be used. See
-[working with selectors](./selectors.md) for more details.
+[working with selectors](../selectors.md) for more details.
 
 ## input-source
 - `source` <[string]>
+
 A selector to search for an element to drag. If there are multiple elements satisfying the selector, the first will be used. See
-[working with selectors](./selectors.md) for more details.
+[working with selectors](../selectors.md) for more details.
 
 ## input-target
 - `target` <[string]>
+
 A selector to search for an element to drop onto. If there are multiple elements satisfying the selector, the first will be used. See
-[working with selectors](./selectors.md) for more details.
+[working with selectors](../selectors.md) for more details.
 
 ## input-position
 - `position` <[Object]>
@@ -102,7 +104,7 @@ defaults to 1. See [UIEvent.detail].
 ## input-trial
 - `trial` <[boolean]>
 
-When set, this method only performs the [actionability](./actionability.md) checks and skips the action. Defaults to `false`. Useful to wait until the element is ready for the action without performing it.
+When set, this method only performs the [actionability](../actionability.md) checks and skips the action. Defaults to `false`. Useful to wait until the element is ready for the action without performing it.
 
 ## input-source-position
 - `sourcePosition` <[Object]>
@@ -128,12 +130,12 @@ Whether to check or uncheck the checkbox.
 ## query-selector
 - `selector` <[string]>
 
-A selector to query for. See [working with selectors](./selectors.md) for more details.
+A selector to query for. See [working with selectors](../selectors.md) for more details.
 
 ## find-selector
 - `selector` <[string]>
 
-A selector to use when resolving DOM element. See [working with selectors](./selectors.md) for more details.
+A selector to use when resolving DOM element. See [working with selectors](../selectors.md) for more details.
 
 ## wait-for-selector-state
 - `state` <[WaitForSelectorState]<"attached"|"detached"|"visible"|"hidden">>
@@ -186,10 +188,10 @@ Dangerous option; use with care. Defaults to `false`.
   - `server` <[string]> Proxy to be used for all requests. HTTP and SOCKS proxies are supported, for example
     `http://myproxy.com:3128` or `socks5://myproxy.com:3128`. Short form `myproxy.com:3128` is considered an HTTP
     proxy.
-  - `bypass` <[string]> Optional comma-separated domains to bypass proxy, for example `".com, chromium.org,
+  - `bypass` ?<[string]> Optional comma-separated domains to bypass proxy, for example `".com, chromium.org,
     .domain.com"`.
-  - `username` <[string]> Optional username to use if HTTP proxy requires authentication.
-  - `password` <[string]> Optional password to use if HTTP proxy requires authentication.
+  - `username` ?<[string]> Optional username to use if HTTP proxy requires authentication.
+  - `password` ?<[string]> Optional password to use if HTTP proxy requires authentication.
 
 Network proxy settings.
 
@@ -310,26 +312,32 @@ Target URL.
 
 Query parameters to be sent with the URL.
 
-## java-fetch-params
+## csharp-fetch-option-params
+* langs: csharp
+- `params` <[Object]<[string], [Serializable]>>
+
+Query parameters to be sent with the URL.
+
+## java-csharp-fetch-params
 * langs: java
-- `options` <[RequestOptions]>
+- `options` ?<[RequestOptions]>
 
 Optional request parameters.
 
-## js-python-fetch-option-headers
-* langs: js, python
+## js-python-csharp-fetch-option-headers
+* langs: js, python, csharp
 - `headers` <[Object]<[string], [string]>>
 
 Allows to set HTTP headers.
 
-## js-python-fetch-option-timeout
-* langs: js, python
+## js-python-csharp-fetch-option-timeout
+* langs: js, python, csharp
 - `timeout` <[float]>
 
 Request timeout in milliseconds. Defaults to `30000` (30 seconds). Pass `0` to disable timeout.
 
-## js-python-fetch-option-failonstatuscode
-* langs: js, python
+## js-python-csharp-fetch-option-failonstatuscode
+* langs: js, python, csharp
 - `failOnStatusCode` <[boolean]>
 
 Whether to throw on response codes other than 2xx and 3xx. By default response object is returned
@@ -343,7 +351,17 @@ Provides an object that will be serialized as html form using `application/x-www
 this request body. If this parameter is specified `content-type` header will be set to `application/x-www-form-urlencoded`
 unless explicitly provided.
 
-## js-pyhton-fetch-option-multipart
+## csharp-fetch-option-form
+* langs: csharp
+- `form` <[FormData]>
+
+Provides an object that will be serialized as html form using `application/x-www-form-urlencoded` encoding and sent as
+this request body. If this parameter is specified `content-type` header will be set to `application/x-www-form-urlencoded`
+unless explicitly provided.
+
+An instance of [FormData] can be created via [`method: APIRequestContext.createFormData`].
+
+## js-python-fetch-option-multipart
 * langs: js, python
 - `multipart` <[Object]<[string], [string]|[float]|[boolean]|[ReadStream]|[Object]>>
   - `name` <[string]> File name
@@ -355,26 +373,43 @@ this request body. If this parameter is specified `content-type` header will be 
 unless explicitly provided. File values can be passed either as [`fs.ReadStream`](https://nodejs.org/api/fs.html#fs_class_fs_readstream)
 or as file-like object containing file name, mime-type and its content.
 
-## js-python-fetch-option-data
-* langs: js, python
+## csharp-fetch-option-multipart
+* langs: csharp
+- `multipart` <[FormData]>
+
+Provides an object that will be serialized as html form using `multipart/form-data` encoding and sent as
+this request body. If this parameter is specified `content-type` header will be set to `multipart/form-data`
+unless explicitly provided. File values can be passed either as [`fs.ReadStream`](https://nodejs.org/api/fs.html#fs_class_fs_readstream)
+or as file-like object containing file name, mime-type and its content.
+
+An instance of [FormData] can be created via [`method: APIRequestContext.createFormData`].
+
+## js-python-csharp-fetch-option-data
+* langs: js, python, csharp
 - `data` <[string]|[Buffer]|[Serializable]>
 
 Allows to set post data of the request. If the data parameter is an object, it will be serialized to json string
 and `content-type` header will be set to `application/json` if not explicitly set. Otherwise the `content-type` header will be
 set to `application/octet-stream` if not explicitly set.
 
-## js-python-fetch-option-ignorehttpserrors
-* langs: js, python
+## js-python-csharp-fetch-option-ignorehttpserrors
+* langs: js, python, csharp
 - `ignoreHTTPSErrors` <[boolean]>
 
 Whether to ignore HTTPS errors when sending network requests. Defaults to `false`.
 
+## js-python-csharp-fetch-option-maxredirects
+* langs: js, python, csharp
+- `maxRedirects` <[int]>
+
+Maximum number of request redirects that will be followed automatically. An error will be thrown if the number is exceeded.
+Defaults to `20`. Pass `0` to not follow redirects.
+
 ## evaluate-expression
 - `expression` <[string]>
 
-JavaScript expression to be evaluated in the browser context. If it looks like
-a function declaration, it is interpreted as a function. Otherwise, evaluated
-as an expression.
+JavaScript expression to be evaluated in the browser context. If the expresion evaluates
+to a function, the function is automatically invoked.
 
 ## js-evaluate-pagefunction
 * langs: js
@@ -456,7 +491,7 @@ for a list of supported timezone IDs.
 - `geolocation` <[Object]>
   - `latitude` <[float]> Latitude between -90 and 90.
   - `longitude` <[float]> Longitude between -180 and 180.
-  - `accuracy` <[float]> Non-negative accuracy value. Defaults to `0`.
+  - `accuracy` ?<[float]> Non-negative accuracy value. Defaults to `0`.
 
 ## context-option-locale
 - `locale` <[string]>
@@ -505,10 +540,6 @@ to `'no-preference'`.
 Emulates `'forced-colors'` media feature, supported values are `'active'`, `'none'`. See [`method: Page.emulateMedia`] for more details. Defaults
 to `'none'`.
 
-:::note
-It's not supported in WebKit, see [here](https://bugs.webkit.org/show_bug.cgi?id=225281) in their issue tracker.
-:::
-
 ## context-option-logger
 * langs: js
 - `logger` <[Logger]>
@@ -532,9 +563,12 @@ Logger sink for Playwright logging.
 ## context-option-recordhar
 * langs: js
 - `recordHar` <[Object]>
-  - `omitContent` <[boolean]> Optional setting to control whether to omit request content from the HAR. Defaults to
-    `false`.
-  - `path` <[path]> Path on the filesystem to write the HAR file to.
+  - `omitContent` ?<[boolean]> Optional setting to control whether to omit request content from the HAR. Defaults to
+    `false`. Deprecated, use `content` policy instead.
+  - `content` ?<[HarContentPolicy]<"omit"|"embed"|"attach">> Optional setting to control resource content management. If `omit` is specified, content is not persisted. If `attach` is specified, resources are persisted as separate files or entries in the ZIP archive. If `embed` is specified, content is stored inline the HAR file as per HAR specification. Defaults to `attach` for `.zip` output files and to `embed` for all other file extensions.
+  - `path` <[path]> Path on the filesystem to write the HAR file to. If the file name ends with `.zip`, `content: 'attach'` is used by default.
+  - `mode` ?<[HarMode]<"full"|"minimal">> When set to `minimal`, only record information necessary for routing from HAR. This omits sizes, timing, page, cookies, security and other types of HAR information that are not used when replaying from HAR. Defaults to `full`.
+  - `urlFilter` ?<[string]|[RegExp]> A glob or regex pattern to filter requests that are stored in the HAR. When a [`option: baseURL`] via the context options was provided and the passed URL is a path, it gets merged via the [`new URL()`](https://developer.mozilla.org/en-US/docs/Web/API/URL/URL) constructor.
 
 Enables [HAR](http://www.softwareishard.com/blog/har-12-spec) recording for all pages into `recordHar.path` file. If not
 specified, the HAR is not recorded. Make sure to await [`method: BrowserContext.close`] for the HAR to be
@@ -552,15 +586,34 @@ call [`method: BrowserContext.close`] for the HAR to be saved.
 ## context-option-recordhar-omit-content
 * langs: csharp, java, python
   - alias-python: record_har_omit_content
-- `recordHarOmitContent` <[boolean]>
+- `recordHarOmitContent` ?<[boolean]>
 
 Optional setting to control whether to omit request content from the HAR. Defaults to `false`.
+
+## context-option-recordhar-content
+* langs: csharp, java, python
+  - alias-python: record_har_content
+- `recordHarContent` ?<[HarContentPolicy]<"omit"|"embed"|"attach">>
+
+Optional setting to control resource content management. If `omit` is specified, content is not persisted. If `attach` is specified, resources are persisted as separate files and all of these files are archived along with the HAR file. Defaults to `embed`, which stores content inline the HAR file as per HAR specification.
+
+## context-option-recordhar-mode
+* langs: csharp, java, python
+  - alias-python: record_har_mode
+- `recordHarMode` ?<[HarMode]<"full"|"minimal">>
+
+When set to `minimal`, only record information necessary for routing from HAR. This omits sizes, timing, page, cookies, security and other types of HAR information that are not used when replaying from HAR. Defaults to `full`.
+
+## context-option-recordhar-url-filter
+* langs: csharp, java, python
+  - alias-python: record_har_url_filter
+- `recordHarUrlFilter` ?<[string]|[RegExp]>
 
 ## context-option-recordvideo
 * langs: js
 - `recordVideo` <[Object]>
   - `dir` <[path]> Path to the directory to put videos into.
-  - `size` <[Object]> Optional dimensions of the recorded videos. If not specified the size will be equal to `viewport`
+  - `size` ?<[Object]> Optional dimensions of the recorded videos. If not specified the size will be equal to `viewport`
     scaled down to fit into 800x800. If `viewport` is not configured explicitly the video size defaults to 800x450.
     Actual picture of each page will be scaled down if necessary to fit the specified size.
     - `width` <[int]> Video frame width.
@@ -594,9 +647,9 @@ Actual picture of each page will be scaled down if necessary to fit the specifie
 - `proxy` <[Object]>
   - `server` <[string]> Proxy to be used for all requests. HTTP and SOCKS proxies are supported, for example
     `http://myproxy.com:3128` or `socks5://myproxy.com:3128`. Short form `myproxy.com:3128` is considered an HTTP proxy.
-  - `bypass` <[string]> Optional comma-separated domains to bypass proxy, for example `".com, chromium.org, .domain.com"`.
-  - `username` <[string]> Optional username to use if HTTP proxy requires authentication.
-  - `password` <[string]> Optional password to use if HTTP proxy requires authentication.
+  - `bypass` ?<[string]> Optional comma-separated domains to bypass proxy, for example `".com, chromium.org, .domain.com"`.
+  - `username` ?<[string]> Optional username to use if HTTP proxy requires authentication.
+  - `password` ?<[string]> Optional password to use if HTTP proxy requires authentication.
 
 Network proxy settings to use with this context.
 
@@ -609,16 +662,24 @@ contexts override the proxy, global proxy will be never used and can be any stri
 ## context-option-strict
 - `strictSelectors` <[boolean]>
 
-It specified, enables strict selectors mode for this context. In the strict selectors mode all operations
+If specified, enables strict selectors mode for this context. In the strict selectors mode all operations
 on selectors that imply single target DOM element will throw when more than one element matches the selector.
 See [Locator] to learn more about the strict mode.
+
+## context-option-service-worker-policy
+- `serviceWorkers` <[ServiceWorkerPolicy]<"allow"|"block">>
+
+Whether to allow sites to register Service workers. Defaults to `'allow'`.
+* `'allow'`: [Service Workers](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API) can be registered.
+* `'block'`: Playwright will block all registration of Service Workers.
+
 
 ## select-options-values
 * langs: java, js, csharp
 - `values` <[null]|[string]|[ElementHandle]|[Array]<[string]>|[Object]|[Array]<[ElementHandle]>|[Array]<[Object]>>
-  - `value` <[string]> Matches by `option.value`. Optional.
-  - `label` <[string]> Matches by `option.label`. Optional.
-  - `index` <[int]> Matches by the index. Optional.
+  - `value` ?<[string]> Matches by `option.value`. Optional.
+  - `label` ?<[string]> Matches by `option.label`. Optional.
+  - `index` ?<[int]> Matches by the index. Optional.
 
 Options to select. If the `<select>` has the `multiple` attribute, all matching options are selected, otherwise only the
 first option matching one of the passed options is selected. String values are equivalent to `{value:'string'}`. Option
@@ -628,7 +689,7 @@ is considered matching if all specified properties match.
 - `url` <[string]|[RegExp]|[function]\([URL]\):[boolean]>
 
 A glob pattern, regex pattern or predicate receiving [URL] to match while waiting for the navigation. Note that if
-the parameter is a string without wilcard characters, the method will wait for navigation to URL that is exactly
+the parameter is a string without wildcard characters, the method will wait for navigation to URL that is exactly
 equal to the string.
 
 ## wait-for-event-event
@@ -638,7 +699,7 @@ equal to the string.
 Event name, same one typically passed into `*.on(event)`.
 
 ## wait-for-load-state-state
-- `state` <[LoadState]<"load"|"domcontentloaded"|"networkidle">>
+- `state` ?<[LoadState]<"load"|"domcontentloaded"|"networkidle">>
 
 Optional load state to wait for, defaults to `load`. If the state has been already reached while loading current document, the
 method resolves immediately. Can be one of:
@@ -660,26 +721,26 @@ Action that triggers the event.
 
 ## python-select-options-element
 * langs: python
-- `element` <[ElementHandle]|[Array]<[ElementHandle]>>
+- `element` ?<[ElementHandle]|[Array]<[ElementHandle]>>
 
 Option elements to select. Optional.
 
 ## python-select-options-index
 * langs: python
-- `index` <[int]|[Array]<[int]>>
+- `index` ?<[int]|[Array]<[int]>>
 
 Options to select by index. Optional.
 
 ## python-select-options-value
 * langs: python
-- `value` <[string]|[Array]<[string]>>
+- `value` ?<[string]|[Array]<[string]>>
 
 Options to select by value. If the `<select>` has the `multiple` attribute, all given options are selected, otherwise
 only the first option matching one of the passed options is selected. Optional.
 
 ## python-select-options-label
 * langs: python
-- `label` <[string]|[Array]<[string]>>
+- `label` ?<[string]|[Array]<[string]>>
 
 Options to select by label. If the `<select>` has the `multiple` attribute, all given options are selected, otherwise
 only the first option matching one of the passed options is selected. Optional.
@@ -719,7 +780,7 @@ Time to retry the assertion for.
 * langs: js
 - `maxDiffPixels` <[int]>
 
-An acceptable amount of pixels that could be different, default is configurable with `TestConfig.expect`. Default is configurable with `TestConfig.expect`. Unset by default.
+An acceptable amount of pixels that could be different. Default is configurable with `TestConfig.expect`. Unset by default.
 
 ## assertions-max-diff-pixel-ratio
 * langs: js
@@ -733,7 +794,7 @@ An acceptable ratio of pixels that are different to the total amount of pixels, 
 
 An acceptable perceived color difference in the [YIQ color space](https://en.wikipedia.org/wiki/YIQ) between the same pixel in compared images, between zero (strict) and one (lax), default is configurable with `TestConfig.expect`. Defaults to `0.2`.
 
-## shared-context-params-list
+## shared-context-params-list-v1.8
 - %%-context-option-acceptdownloads-%%
 - %%-context-option-ignorehttpserrors-%%
 - %%-context-option-bypasscsp-%%
@@ -764,10 +825,14 @@ An acceptable perceived color difference in the [YIQ color space](https://en.wik
 - %%-context-option-recordhar-%%
 - %%-context-option-recordhar-path-%%
 - %%-context-option-recordhar-omit-content-%%
+- %%-context-option-recordhar-content-%%
+- %%-context-option-recordhar-mode-%%
+- %%-context-option-recordhar-url-filter-%%
 - %%-context-option-recordvideo-%%
 - %%-context-option-recordvideo-dir-%%
 - %%-context-option-recordvideo-size-%%
 - %%-context-option-strict-%%
+- %%-context-option-service-worker-policy-%%
 
 ## browser-option-args
 - `args` <[Array]<[string]>>
@@ -778,7 +843,7 @@ Additional arguments to pass to the browser instance. The list of Chromium flags
 ## browser-option-channel
 - `channel` <[string]>
 
-Browser distribution channel.  Supported values are "chrome", "chrome-beta", "chrome-dev", "chrome-canary", "msedge", "msedge-beta", "msedge-dev", "msedge-canary". Read more about using [Google Chrome and Microsoft Edge](./browsers.md#google-chrome--microsoft-edge).
+Browser distribution channel.  Supported values are "chrome", "chrome-beta", "chrome-dev", "chrome-canary", "msedge", "msedge-beta", "msedge-dev", "msedge-canary". Read more about using [Google Chrome and Microsoft Edge](../browsers.md#google-chrome--microsoft-edge).
 
 ## browser-option-chromiumsandbox
 - `chromiumSandbox` <[boolean]>
@@ -865,7 +930,7 @@ If specified, traces are saved into this directory.
 
 Slows down Playwright operations by the specified amount of milliseconds. Useful so that you can see what is going on.
 
-## shared-browser-options-list
+## shared-browser-options-list-v1.8
 - %%-browser-option-args-%%
 - %%-browser-option-channel-%%
 - %%-browser-option-chromiumsandbox-%%
@@ -886,7 +951,7 @@ Slows down Playwright operations by the specified amount of milliseconds. Useful
 ## locator-option-has-text
 - `hasText` <[string]|[RegExp]>
 
-Matches elements containing specified text somewhere inside, possibly in a child or a descendant element.
+Matches elements containing specified text somewhere inside, possibly in a child or a descendant element. When passed a [string], matching is case-insensitive and searches for a substring.
 For example, `"Playwright"` matches `<article><div>Playwright</div></article>`.
 
 ## locator-option-has
@@ -897,7 +962,7 @@ For example, `article` that has `text=Playwright` matches `<article><div>Playwri
 
 Note that outer and inner locators must belong to the same frame. Inner locator must not contain [FrameLocator]s.
 
-## locator-options-list
+## locator-options-list-v1.14
 - %%-locator-option-has-text-%%
 - %%-locator-option-has-%%
 
@@ -909,6 +974,15 @@ When set to `"disabled"`, stops CSS animations, CSS transitions and Web Animatio
 * infinite animations are canceled to initial state, and then played over after the screenshot.
 
 Defaults to `"allow"` that leaves animations untouched.
+
+## screenshot-option-animations-default-disabled
+- `animations` <[ScreenshotAnimations]<"disabled"|"allow">>
+
+When set to `"disabled"`, stops CSS animations, CSS transitions and Web Animations. Animations get different treatment depending on their duration:
+* finite animations are fast-forwarded to completion, so they'll fire `transitionend` event.
+* infinite animations are canceled to initial state, and then played over after the screenshot.
+
+Defaults to `"disabled"` that disables animations.
 
 ## screenshot-option-omit-background
 - `omitBackground` <[boolean]>
@@ -936,7 +1010,7 @@ Specify screenshot type, defaults to `png`.
 ## screenshot-option-mask
 - `mask` <[Array]<[Locator]>>
 
-Specify locators that should be masked when the screenshot is taken. Masked elements will be overlayed with
+Specify locators that should be masked when the screenshot is taken. Masked elements will be overlaid with
 a pink box `#FF00FF` that completely covers its bounding box.
 
 ## screenshot-option-full-page
@@ -954,24 +1028,32 @@ When true, takes a screenshot of the full scrollable page, instead of the curren
 
 An object which specifies clipping of the resulting image. Should have the following fields:
 
-## screenshot-option-size
-- `size` <[ScreenshotSize]<"css"|"device">>
+## screenshot-option-scale
+- `scale` <[ScreenshotScale]<"css"|"device">>
 
-When set to `"css"`, screenshot will have a single pixel per each css pixel on the page. For high-dpi devices, this will keep screenshots small. Using `"device"` option will produce a single pixel per each device pixel, so screenhots of high-dpi devices will be twice as large or even larger. Defaults to `"device"`.
+When set to `"css"`, screenshot will have a single pixel per each css pixel on the page. For high-dpi devices, this will keep screenshots small. Using `"device"` option will produce a single pixel per each device pixel, so screenhots of high-dpi devices will be twice as large or even larger.
 
-## screenshot-option-fonts
-- `fonts` <[ScreenshotFonts]<"ready"|"nowait">>
+Defaults to `"device"`.
 
-When set to `"ready"`, screenshot will wait for [`document.fonts.ready`](https://developer.mozilla.org/en-US/docs/Web/API/FontFaceSet/ready) promise to resolve in all frames. Defaults to `"nowait"`.
+## screenshot-option-scale-default-css
+- `scale` <[ScreenshotScale]<"css"|"device">>
 
-## screenshot-options-common-list
+When set to `"css"`, screenshot will have a single pixel per each css pixel on the page. For high-dpi devices, this will keep screenshots small. Using `"device"` option will produce a single pixel per each device pixel, so screenhots of high-dpi devices will be twice as large or even larger.
+
+Defaults to `"css"`.
+
+## screenshot-option-caret
+- `caret` <[ScreenshotCaret]<"hide"|"initial">>
+
+When set to `"hide"`, screenshot will hide text caret. When set to `"initial"`, text caret behavior will not be changed.  Defaults to `"hide"`.
+
+## screenshot-options-common-list-v1.8
 - %%-screenshot-option-animations-%%
 - %%-screenshot-option-omit-background-%%
 - %%-screenshot-option-quality-%%
 - %%-screenshot-option-path-%%
-- %%-screenshot-option-size-%%
-- %%-screenshot-option-fonts-%%
+- %%-screenshot-option-scale-%%
+- %%-screenshot-option-caret-%%
 - %%-screenshot-option-type-%%
 - %%-screenshot-option-mask-%%
 - %%-input-timeout-%%
-

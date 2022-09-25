@@ -51,7 +51,7 @@ test('should prioritize project timeout', async ({ runInlineTest }) => {
   expect(result.exitCode).toBe(1);
   expect(result.passed).toBe(1);
   expect(result.failed).toBe(1);
-  expect(result.output).toContain('Timeout of 500ms exceeded.');
+  expect(result.output).toContain('Test timeout of 500ms exceeded.');
 });
 
 test('should prioritize command line timeout over project timeout', async ({ runInlineTest }) => {
@@ -69,7 +69,7 @@ test('should prioritize command line timeout over project timeout', async ({ run
 
   expect(result.exitCode).toBe(1);
   expect(result.failed).toBe(1);
-  expect(result.output).toContain('Timeout of 500ms exceeded.');
+  expect(result.output).toContain('Test timeout of 500ms exceeded.');
 });
 
 test('should read config from --config, resolve relative testDir', async ({ runInlineTest }) => {
@@ -373,6 +373,61 @@ test('should inerhit use options in projects', async ({ runInlineTest }) => {
   expect(result.passed).toBe(1);
 });
 
+test('should support ignoreSnapshots config option', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      module.exports = {
+        ignoreSnapshots: true,
+      };
+    `,
+    'a.test.ts': `
+      const { test } = pwt;
+      test('pass', async ({}, testInfo) => {
+        expect('foo').toMatchSnapshot();
+        expect('foo').not.toMatchSnapshot();
+      });
+    `
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(1);
+});
+
+test('should validate workers option set to percent', async ({ runInlineTest }, testInfo) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      module.exports = {
+        workers: '50%'
+      };
+    `,
+    'a.test.ts': `
+      const { test } = pwt;
+      test('pass', async () => {
+      });
+    `
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(1);
+});
+
+test('should throw when workers option is invalid', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+        module.exports = {
+          workers: ''
+        };
+      `,
+    'a.test.ts': `
+        const { test } = pwt;
+        test('pass', async () => {
+        });
+      `
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.output).toContain('config.workers must be a number or percentage');
+});
+
 test('should work with undefined values and base', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'playwright.config.ts': `
@@ -390,4 +445,86 @@ test('should work with undefined values and base', async ({ runInlineTest }) => 
 
   expect(result.exitCode).toBe(0);
   expect(result.passed).toBe(1);
+});
+
+test('should have correct types for the config', async ({ runTSC }) => {
+  const result = await runTSC({
+    'playwright.config.ts': `
+      import type { PlaywrightTestConfig } from '@playwright/test';
+
+      const config: PlaywrightTestConfig = {
+        webServer: [
+          {
+            command: 'echo 123',
+            env: { PORT: '123' },
+            port: 123,
+          },
+          {
+            command: 'echo 123',
+            env: { NODE_ENV: 'test' },
+            port: 8082,
+          },
+        ],
+        globalSetup: './globalSetup',
+        // @ts-expect-error
+        globalTeardown: null,
+        projects: [
+          {
+            name: 'project name',
+          }
+        ],
+      };
+
+      export default config;
+  `
+  });
+  expect(result.exitCode).toBe(0);
+});
+
+test('should throw when group has duplicate project references', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+        module.exports = {
+          projects: [
+            { name: 'a' },
+          ],
+          groups: {
+            default: [
+              ['a', 'a']
+            ]
+          }
+        };
+    `,
+    'a.test.ts': `
+        const { test } = pwt;
+        test('pass', async () => {});
+      `
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.output).toContain(`config.groups.default group mentions project 'a' twice in one parallel group`);
+});
+
+test('should throw when group has unknown project reference', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+        module.exports = {
+          projects: [
+            { name: 'a' },
+          ],
+          groups: {
+            default: [
+              [{project: 'b'}]
+            ]
+          }
+        };
+    `,
+    'a.test.ts': `
+        const { test } = pwt;
+        test('pass', async () => {});
+      `
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.output).toContain(`config.groups.default refers to an unknown project 'b'`);
 });

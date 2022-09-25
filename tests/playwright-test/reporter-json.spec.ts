@@ -133,11 +133,11 @@ test('should show steps', async ({ runInlineTest }) => {
   expect(result.exitCode).toBe(1);
   expect(result.report.suites.length).toBe(1);
   expect(result.report.suites[0].specs.length).toBe(1);
-  expect(result.report.suites[0].specs[0].tests[0].results[0].steps[0].title).toBe('math works in a step');
-  expect(result.report.suites[0].specs[0].tests[0].results[0].steps[0].steps[0].title).toBe('nested step');
-  expect(result.report.suites[0].specs[0].tests[0].results[0].steps[0].steps[0].steps[0].title).toBe('deeply nested step');
-  expect(result.report.suites[0].specs[0].tests[0].results[0].steps[0].steps[0].steps[0].steps).toBeUndefined();
-  expect(result.report.suites[0].specs[0].tests[0].results[0].steps[1].error).not.toBeUndefined();
+  expect(result.report.suites[0].specs[0].tests[0].results[0].steps![0].title).toBe('math works in a step');
+  expect(result.report.suites[0].specs[0].tests[0].results[0].steps![0].steps![0].title).toBe('nested step');
+  expect(result.report.suites[0].specs[0].tests[0].results[0].steps![0].steps![0].steps![0].title).toBe('deeply nested step');
+  expect(result.report.suites[0].specs[0].tests[0].results[0].steps![0].steps![0].steps![0].steps).toBeUndefined();
+  expect(result.report.suites[0].specs[0].tests[0].results[0].steps![1].error).not.toBeUndefined();
 });
 
 test('should display tags separately from title', async ({ runInlineTest }) => {
@@ -198,8 +198,8 @@ test('should have error position in results', async ({
   });
   expect(result.exitCode).toBe(1);
   expect(result.report.suites[0].specs[0].file).toBe('a.test.js');
-  expect(result.report.suites[0].specs[0].tests[0].results[0].errorLocation.line).toBe(7);
-  expect(result.report.suites[0].specs[0].tests[0].results[0].errorLocation.column).toBe(23);
+  expect(result.report.suites[0].specs[0].tests[0].results[0].errorLocation!.line).toBe(7);
+  expect(result.report.suites[0].specs[0].tests[0].results[0].errorLocation!.column).toBe(23);
 });
 
 test('should add dot in addition to file json with CI', async ({ runInlineTest }, testInfo) => {
@@ -234,4 +234,17 @@ test('should add line in addition to file json without CI', async ({ runInlineTe
   expect(result.exitCode).toBe(0);
   expect(stripAnsi(result.output)).toContain('[1/1] a.test.js:6:7 › one');
   expect(fs.existsSync(testInfo.outputPath('a.json'))).toBeTruthy();
+});
+test('should have starting time in results', async ({ runInlineTest }, testInfo) => {
+  const result = await runInlineTest({
+    'a.test.js': `
+      const { test } = pwt;
+      test('math works!', async ({}) => {
+        expect(1 + 1).toBe(2);
+      });
+    `
+  },   { reporter: 'json' });
+  expect(result.exitCode).toBe(0);
+  const startTime = result.report.suites[0].specs[0].tests[0].results[0].startTime;
+  expect(new Date(startTime).getTime()).toBeGreaterThan(new Date('1/1/2000').getTime());
 });

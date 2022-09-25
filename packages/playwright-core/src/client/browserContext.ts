@@ -18,26 +18,29 @@
 import { Page, BindingCall } from './page';
 import { Frame } from './frame';
 import * as network from './network';
-import * as channels from '../protocol/channels';
+import type * as channels from '@protocol/channels';
 import fs from 'fs';
 import { ChannelOwner } from './channelOwner';
 import { evaluationScript } from './clientHelper';
 import { Browser } from './browser';
 import { Worker } from './worker';
 import { Events } from './events';
-import { TimeoutSettings } from '../utils/timeoutSettings';
+import { TimeoutSettings } from '../common/timeoutSettings';
 import { Waiter } from './waiter';
-import { URLMatch, Headers, WaitForEventOptions, BrowserContextOptions, StorageState, LaunchOptions } from './types';
-import { headersObjectToArray, mkdirIfNeeded } from '../utils/utils';
-import { isSafeCloseError } from '../utils/errors';
-import * as api from '../../types/types';
-import * as structs from '../../types/structs';
+import type { URLMatch, Headers, WaitForEventOptions, BrowserContextOptions, StorageState, LaunchOptions } from './types';
+import { headersObjectToArray, isRegExp, isString } from '../utils';
+import { mkdirIfNeeded } from '../utils/fileUtils';
+import { isSafeCloseError } from '../common/errors';
+import type * as api from '../../types/types';
+import type * as structs from '../../types/structs';
 import { CDPSession } from './cdpSession';
 import { Tracing } from './tracing';
 import type { BrowserType } from './browserType';
 import { Artifact } from './artifact';
 import { APIRequestContext } from './fetch';
 import { createInstrumentation } from './clientInstrumentation';
+import { rewriteErrorMessage } from '../utils/stackTrace';
+import { HarRouter } from './harRouter';
 
 export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel> implements api.BrowserContext {
   _pages = new Set<Page>();
@@ -55,6 +58,7 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
   readonly _backgroundPages = new Set<Page>();
   readonly _serviceWorkers = new Set<Worker>();
   readonly _isChromium: boolean;
+  private _harRecorders = new Map<string, { path: string, content: 'embed' | 'attach' | 'omit' | undefined }>();
 
   static from(context: channels.BrowserContextChannel): BrowserContext {
     return (context as any)._object;
@@ -70,12 +74,12 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
       this._browser = parent;
     this._isChromium = this._browser?._name === 'chromium';
     this.tracing = Tracing.from(initializer.tracing);
-    this.request = APIRequestContext.from(initializer.APIRequestContext);
+    this.request = APIRequestContext.from(initializer.requestContext);
 
     this._channel.on('bindingCall', ({ binding }) => this._onBinding(BindingCall.from(binding)));
     this._channel.on('close', () => this._onClose());
     this._channel.on('page', ({ page }) => this._onPage(Page.from(page)));
-    this._channel.on('route', ({ route, request }) => this._onRoute(network.Route.from(route), network.Request.from(request)));
+    this._channel.on('route', ({ route }) => this._onRoute(network.Route.from(route)));
     this._channel.on('backgroundPage', ({ page }) => {
       const backgroundPage = Page.from(page);
       this._backgroundPages.add(backgroundPage);
@@ -97,6 +101,8 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
   _setBrowserType(browserType: BrowserType) {
     this._browserType = browserType;
     browserType._contexts.add(this);
+    if (this._options.recordHar)
+      this._harRecorders.set('', { path: this._options.recordHar.path, content: this._options.recordHar.content });
   }
 
   private _onPage(page: Page): void {
@@ -141,23 +147,20 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
       response._finishedPromise.resolve();
   }
 
-  _onRoute(route: network.Route, request: network.Request) {
-    for (const routeHandler of this._routes) {
-      if (routeHandler.matches(request.url())) {
-        try {
-          routeHandler.handle(route, request);
-        } finally {
-          if (!routeHandler.isActive()) {
-            this._routes.splice(this._routes.indexOf(routeHandler), 1);
-            if (!this._routes.length)
-              this._wrapApiCall(() => this._disableInterception(), true).catch(() => {});
-          }
-        }
+  async _onRoute(route: network.Route) {
+    const routeHandlers = this._routes.slice();
+    for (const routeHandler of routeHandlers) {
+      if (!routeHandler.matches(route.request().url()))
+        continue;
+      if (routeHandler.willExpire())
+        this._routes.splice(this._routes.indexOf(routeHandler), 1);
+      const handled = await routeHandler.handle(route);
+      if (!this._routes.length)
+        this._wrapApiCall(() => this._disableInterception(), true).catch(() => {});
+      if (handled)
         return;
-      }
     }
-    // it can race with BrowserContext.close() which then throws since its closed
-    route._internalContinue();
+    await route._innerContinue(true);
   }
 
   async _onBinding(bindingCall: BindingCall) {
@@ -170,14 +173,14 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
   setDefaultNavigationTimeout(timeout: number) {
     this._timeoutSettings.setDefaultNavigationTimeout(timeout);
     this._wrapApiCall(async () => {
-      this._channel.setDefaultNavigationTimeoutNoReply({ timeout });
+      this._channel.setDefaultNavigationTimeoutNoReply({ timeout }).catch(() => {});
     }, true);
   }
 
   setDefaultTimeout(timeout: number) {
     this._timeoutSettings.setDefaultTimeout(timeout);
     this._wrapApiCall(async () => {
-      this._channel.setDefaultTimeoutNoReply({ timeout });
+      this._channel.setDefaultTimeoutNoReply({ timeout }).catch(() => {});
     }, true);
   }
 
@@ -199,7 +202,7 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     if (!urls)
       urls = [];
     if (urls && typeof urls === 'string')
-      urls = [ urls ];
+      urls = [urls];
     return (await this._channel.cookies({ urls: urls as string[] })).cookies;
   }
 
@@ -256,6 +259,28 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     this._routes.unshift(new network.RouteHandler(this._options.baseURL, url, handler, options.times));
     if (this._routes.length === 1)
       await this._channel.setNetworkInterceptionEnabled({ enabled: true });
+  }
+
+  async _recordIntoHAR(har: string, page: Page | null, options: { url?: string | RegExp, notFound?: 'abort' | 'fallback', update?: boolean } = {}): Promise<void> {
+    const { harId } = await this._channel.harStart({
+      page: page?._channel,
+      options: prepareRecordHarOptions({
+        path: har,
+        content: 'attach',
+        mode: 'minimal',
+        urlFilter: options.url
+      })!
+    });
+    this._harRecorders.set(harId, { path: har, content: 'attach' });
+  }
+
+  async routeFromHAR(har: string, options: { url?: string | RegExp, notFound?: 'abort' | 'fallback', update?: boolean } = {}): Promise<void> {
+    if (options.update) {
+      await this._recordIntoHAR(har, null, options);
+      return;
+    }
+    const harRouter = await HarRouter.create(this._connection.localUtils(), har, options.notFound || 'abort', { urlMatch: options.url });
+    harRouter.addContextRoute(this);
   }
 
   async unroute(url: URLMatch, handler?: network.RouteHandlerCallback): Promise<void> {
@@ -318,10 +343,18 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     try {
       await this._wrapApiCall(async () => {
         await this._browserType?._onWillCloseContext?.(this);
-        if (this._options.recordHar)  {
-          const har = await this._channel.harExport();
+        for (const [harId, harParams] of this._harRecorders) {
+          const har = await this._channel.harExport({ harId });
           const artifact = Artifact.from(har.artifact);
-          await artifact.saveAs(this._options.recordHar.path);
+          // Server side will compress artifact if content is attach or if file is .zip.
+          const isCompressed = harParams.content === 'attach' || harParams.path.endsWith('.zip');
+          const needCompressed = harParams.path.endsWith('.zip');
+          if (isCompressed && !needCompressed) {
+            await artifact.saveAs(harParams.path + '.tmp');
+            await this._connection.localUtils()._channel.harUnzip({ zipFile: harParams.path + '.tmp', harFile: harParams.path });
+          } else {
+            await artifact.saveAs(harParams.path);
+          }
           await artifact.delete();
         }
       }, true);
@@ -340,11 +373,36 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
       contextOptions?: BrowserContextOptions,
       device?: string,
       saveStorage?: string,
-      startRecording?: boolean,
-      outputFile?: string
+      mode?: 'recording' | 'inspecting',
+      outputFile?: string,
+      handleSIGINT?: boolean,
   }) {
     await this._channel.recorderSupplementEnable(params);
   }
+}
+
+async function prepareStorageState(options: BrowserContextOptions): Promise<channels.BrowserNewContextParams['storageState']> {
+  if (typeof options.storageState !== 'string')
+    return options.storageState;
+  try {
+    return JSON.parse(await fs.promises.readFile(options.storageState, 'utf8'));
+  } catch (e) {
+    rewriteErrorMessage(e, `Error reading storage state from ${options.storageState}:\n` + e.message);
+    throw e;
+  }
+}
+
+function prepareRecordHarOptions(options: BrowserContextOptions['recordHar']): channels.RecordHarOptions | undefined {
+  if (!options)
+    return;
+  return {
+    path: options.path,
+    content: options.content || (options.omitContent ? 'omit' : undefined),
+    urlGlob: isString(options.urlFilter) ? options.urlFilter : undefined,
+    urlRegexSource: isRegExp(options.urlFilter) ? options.urlFilter.source : undefined,
+    urlRegexFlags: isRegExp(options.urlFilter) ? options.urlFilter.flags : undefined,
+    mode: options.mode
+  };
 }
 
 export async function prepareBrowserContextParams(options: BrowserContextOptions): Promise<channels.BrowserNewContextParams> {
@@ -357,7 +415,9 @@ export async function prepareBrowserContextParams(options: BrowserContextOptions
     viewport: options.viewport === null ? undefined : options.viewport,
     noDefaultViewport: options.viewport === null,
     extraHTTPHeaders: options.extraHTTPHeaders ? headersObjectToArray(options.extraHTTPHeaders) : undefined,
-    storageState: typeof options.storageState === 'string' ? JSON.parse(await fs.promises.readFile(options.storageState, 'utf8')) : options.storageState,
+    storageState: await prepareStorageState(options),
+    serviceWorkers: options.serviceWorkers,
+    recordHar: prepareRecordHarOptions(options.recordHar),
   };
   if (!contextParams.recordVideo && options.videosPath) {
     contextParams.recordVideo = {

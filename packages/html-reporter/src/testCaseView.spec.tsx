@@ -15,9 +15,9 @@
  */
 
 import React from 'react';
-import { test, expect } from '@playwright/experimental-ct-react/test';
+import { test, expect } from '@playwright/experimental-ct-react';
 import { TestCaseView } from './testCaseView';
-import type { TestCase, TestResult } from '../../playwright-test/src/reporters/html';
+import type { TestCase, TestResult } from './types';
 
 test.use({ viewport: { width: 800, height: 600 } });
 
@@ -62,7 +62,7 @@ const testCase: TestCase = {
 };
 
 test('should render test case', async ({ mount }) => {
-  const component = await mount(<TestCaseView projectNames={['chromium', 'webkit']} test={testCase}></TestCaseView>);
+  const component = await mount(<TestCaseView projectNames={['chromium', 'webkit']} test={testCase} run={0} anchor=''></TestCaseView>);
   await expect(component.locator('text=Annotation text').first()).toBeVisible();
   await component.locator('text=Annotations').click();
   await expect(component.locator('text=Annotation text')).not.toBeVisible();

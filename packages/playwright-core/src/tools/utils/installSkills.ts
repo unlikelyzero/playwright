@@ -22,7 +22,7 @@ import path from 'path';
 
 import { libPath } from '../../package';
 
-export const allSkills = ['playwright-cli', 'playwright-component-testing', 'playwright-trace'] as const;
+export const allSkills = ['playwright-cli', 'playwright-component-testing', 'playwright-migrate', 'playwright-trace'] as const;
 
 export type SkillName = typeof allSkills[number];
 export type SkillTarget = 'claude' | 'agents';

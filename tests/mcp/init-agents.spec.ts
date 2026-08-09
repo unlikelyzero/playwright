@@ -127,7 +127,7 @@ test('init-skills installs all skills', async ({  }) => {
 
   await spawnAsync('npx', ['playwright', 'init-skills'], { cwd: baseDir, shell: true });
 
-  for (const skill of ['playwright-cli', 'playwright-component-testing', 'playwright-trace'])
+  for (const skill of ['playwright-cli', 'playwright-component-testing', 'playwright-migrate', 'playwright-trace'])
     expect(fs.existsSync(path.join(baseDir, '.claude', 'skills', skill, 'SKILL.md'))).toBe(true);
   expect(fs.existsSync(path.join(baseDir, '.claude', 'skills', 'playwright-cli', 'references', 'tracing.md'))).toBe(true);
 });
@@ -137,6 +137,6 @@ test('init-skills installs into .agents with --loop agents', async ({  }) => {
 
   await spawnAsync('npx', ['playwright', 'init-skills', '--loop', 'agents'], { cwd: baseDir, shell: true });
 
-  for (const skill of ['playwright-cli', 'playwright-component-testing', 'playwright-trace'])
+  for (const skill of ['playwright-cli', 'playwright-component-testing', 'playwright-migrate', 'playwright-trace'])
     expect(fs.existsSync(path.join(baseDir, '.agents', 'skills', skill, 'SKILL.md'))).toBe(true);
 });

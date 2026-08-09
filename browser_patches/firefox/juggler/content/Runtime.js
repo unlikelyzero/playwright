@@ -8,8 +8,8 @@
 
 if (!this.Debugger) {
   // Worker has a Debugger defined already.
-  const {addDebuggerToGlobal} = ChromeUtils.import("resource://gre/modules/jsdebugger.jsm", {});
-  addDebuggerToGlobal(Components.utils.getGlobalForObject(this));
+  const {addDebuggerToGlobal} = ChromeUtils.importESModule("resource://gre/modules/jsdebugger.sys.mjs");
+  addDebuggerToGlobal(Components.utils.getGlobalForObject(globalThis));
 }
 
 let lastId = 0;
@@ -63,14 +63,14 @@ class Runtime {
     if (isWorker) {
       this._registerWorkerConsoleHandler();
     } else {
-      const {Services} = ChromeUtils.import("resource://gre/modules/Services.jsm");
       this._registerConsoleServiceListener(Services);
-      this._registerConsoleObserver(Services);
+      this._registerConsoleAPIListener(Services);
     }
     // We can't use event listener here to be compatible with Worker Global Context.
     // Use plain callbacks instead.
     this.events = {
       onConsoleMessage: createEvent(),
+      onRuntimeError: createEvent(),
       onErrorFromWorker: createEvent(),
       onExecutionContextCreated: createEvent(),
       onExecutionContextDestroyed: createEvent(),
@@ -129,57 +129,86 @@ class Runtime {
 
       observe: message => {
         if (!(message instanceof Ci.nsIScriptError) || !message.outerWindowID ||
-            !message.category || disallowedMessageCategories.has(message.category) || message.hasException) {
+            !message.category || disallowedMessageCategories.has(message.category)) {
           return;
         }
         const errorWindow = Services.wm.getOuterWindowWithId(message.outerWindowID);
+        // Note: error locations are one-based, while console locations are zero-based in Firefox.
+        // We want to report all of them as zero-based.
+        const errorLocation = {
+          lineNumber: message.lineNumber - 1,
+          columnNumber: message.columnNumber - 1,
+          url: message.sourceName,
+        };
         if (message.category === 'Web Worker' && message.logLevel === Ci.nsIConsoleMessage.error) {
-          emitEvent(this.events.onErrorFromWorker, errorWindow, message.message, '' + message.stack);
+          emitEvent(this.events.onErrorFromWorker, errorWindow, message.message, '' + message.stack, errorLocation);
           return;
         }
         const executionContext = this._windowToExecutionContext.get(errorWindow);
-        if (!executionContext)
+        if (!executionContext) {
           return;
+        }
         const typeNames = {
           [Ci.nsIConsoleMessage.debug]: 'debug',
           [Ci.nsIConsoleMessage.info]: 'info',
           [Ci.nsIConsoleMessage.warn]: 'warn',
           [Ci.nsIConsoleMessage.error]: 'error',
         };
-        emitEvent(this.events.onConsoleMessage, {
-          args: [{
-            value: message.message,
-          }],
-          type: typeNames[message.logLevel],
-          executionContextId: executionContext.id(),
-          location: {
-            lineNumber: message.lineNumber,
-            columnNumber: message.columnNumber,
-            url: message.sourceName,
-          },
-        });
+        if (!message.hasException) {
+          emitEvent(this.events.onConsoleMessage, {
+            args: [{
+              value: message.message,
+            }],
+            type: typeNames[message.logLevel],
+            executionContextId: executionContext.id(),
+            location: {
+              lineNumber: message.lineNumber,
+              columnNumber: message.columnNumber,
+              url: message.sourceName,
+            },
+          });
+        } else {
+          emitEvent(this.events.onRuntimeError, {
+            executionContext,
+            message: message.errorMessage,
+            stack: message.stack ? message.stack.toString() : '',
+            location: errorLocation,
+          });
+        }
       },
     };
     Services.console.registerListener(consoleServiceListener);
     this._eventListeners.push(() => Services.console.unregisterListener(consoleServiceListener));
   }
 
-  _registerConsoleObserver(Services) {
-    const consoleObserver = ({wrappedJSObject}, topic, data) => {
+  _registerConsoleAPIListener(Services) {
+    const Ci = Components.interfaces;
+    const Cc = Components.classes;
+    const ConsoleAPIStorage = Cc["@mozilla.org/consoleAPI-storage;1"].getService(Ci.nsIConsoleAPIStorage);
+    const onMessage = ({ wrappedJSObject }) => {
       const executionContext = Array.from(this._executionContexts.values()).find(context => {
         // There is no easy way to determine isolated world context and we normally don't write
         // objects to console from utility worlds so we always return main world context here.
         if (context._isIsolatedWorldContext())
           return false;
         const domWindow = context._domWindow;
-        return domWindow && domWindow.windowGlobalChild.innerWindowId === wrappedJSObject.innerID;
+        try {
+          // `windowGlobalChild` might be dead already; accessing it will throw an error, message in a console,
+          // and infinite recursion.
+          return domWindow && domWindow.windowGlobalChild.innerWindowId === wrappedJSObject.innerID;
+        } catch (e) {
+          return false;
+        }
       });
       if (!executionContext)
         return;
       this._onConsoleMessage(executionContext, wrappedJSObject);
-    };
-    Services.obs.addObserver(consoleObserver, "console-api-log-event");
-    this._eventListeners.push(() => Services.obs.removeObserver(consoleObserver, "console-api-log-event"));
+    }
+    ConsoleAPIStorage.addLogEventListener(
+      onMessage,
+      Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal)
+    );
+    this._eventListeners.push(() => ConsoleAPIStorage.removeLogEventListener(onMessage));
   }
 
   _registerWorkerConsoleHandler() {
@@ -218,8 +247,9 @@ class Runtime {
       return {success: true, obj: obj.promiseValue};
     if (obj.promiseState === 'rejected') {
       const debuggee = executionContext._debuggee;
-      exceptionDetails.text = debuggee.executeInGlobalWithBindings('e.message', {e: obj.promiseReason}).return;
-      exceptionDetails.stack = debuggee.executeInGlobalWithBindings('e.stack', {e: obj.promiseReason}).return;
+      const errorInfo = debuggee.executeInGlobalWithBindings('({m: e?.message, s: e?.stack})', {e: obj.promiseReason}, {useInnerBindings: true}).return;
+      exceptionDetails.text = errorInfo.getOwnPropertyDescriptor('m').value;
+      exceptionDetails.stack = errorInfo.getOwnPropertyDescriptor('s').value;
       return {success: false, obj: null};
     }
     let resolve, reject;
@@ -246,8 +276,9 @@ class Runtime {
       return;
     };
     const debuggee = pendingPromise.executionContext._debuggee;
-    pendingPromise.exceptionDetails.text = debuggee.executeInGlobalWithBindings('e.message', {e: obj.promiseReason}).return;
-    pendingPromise.exceptionDetails.stack = debuggee.executeInGlobalWithBindings('e.stack', {e: obj.promiseReason}).return;
+    const errorInfo = debuggee.executeInGlobalWithBindings('({m: e?.message, s: e?.stack})', {e: obj.promiseReason}, {useInnerBindings: true}).return;
+    pendingPromise.exceptionDetails.text = errorInfo.getOwnPropertyDescriptor('m').value;
+    pendingPromise.exceptionDetails.stack = errorInfo.getOwnPropertyDescriptor('s').value;
     pendingPromise.resolve({success: false, obj: null});
   }
 
@@ -295,8 +326,9 @@ class ExecutionContext {
     this._id = generateId();
     this._auxData = auxData;
     this._jsonStringifyObject = this._debuggee.executeInGlobal(`((stringify, object) => {
-      const oldToJSON = Date.prototype.toJSON;
-      Date.prototype.toJSON = undefined;
+      const oldToJSON = Date.prototype?.toJSON;
+      if (oldToJSON)
+        Date.prototype.toJSON = undefined;
       const oldArrayToJSON = Array.prototype.toJSON;
       const oldArrayHadToJSON = Array.prototype.hasOwnProperty('toJSON');
       if (oldArrayHadToJSON)
@@ -309,7 +341,8 @@ class ExecutionContext {
         return value;
       });
 
-      Date.prototype.toJSON = oldToJSON;
+      if (oldToJSON)
+        Date.prototype.toJSON = oldToJSON;
       if (oldArrayHadToJSON)
         Array.prototype.toJSON = oldArrayToJSON;
 
@@ -334,7 +367,7 @@ class ExecutionContext {
     if (this._domWindow && this._domWindow.document)
       this._domWindow.document.notifyUserGestureActivation();
 
-    let {success, obj} = this._getResult(this._debuggee.executeInGlobal(script), exceptionDetails);
+    let {success, obj} = this._getResult(this._debuggee.executeInGlobal(script, {bypassCSP: true}), exceptionDetails);
     userInputHelper && userInputHelper.destruct();
     if (!success)
       return null;
@@ -349,18 +382,13 @@ class ExecutionContext {
 
   evaluateScriptSafely(script) {
     try {
-      this._debuggee.executeInGlobal(script);
+      this._debuggee.executeInGlobal(script, {bypassCSP: true});
     } catch (e) {
-      dump(`ERROR: ${e.message}\n${e.stack}\n`);
+      dump(`WARNING: ${e.message}\n${e.stack}\n`);
     }
   }
 
   async evaluateFunction(functionText, args, exceptionDetails = {}) {
-    const funEvaluation = this._getResult(this._debuggee.executeInGlobal('(' + functionText + ')'), exceptionDetails);
-    if (!funEvaluation.success)
-      return null;
-    if (!funEvaluation.obj.callable)
-      throw new Error('functionText does not evaluate to a function!');
     args = args.map(arg => {
       if (arg.objectId) {
         if (!this._remoteObjects.has(arg.objectId))
@@ -378,7 +406,15 @@ class ExecutionContext {
     const userInputHelper = this._domWindow ? this._domWindow.windowUtils.setHandlingUserInput(true) : null;
     if (this._domWindow && this._domWindow.document)
       this._domWindow.document.notifyUserGestureActivation();
-    let {success, obj} = this._getResult(funEvaluation.obj.apply(null, args), exceptionDetails);
+    // Invoke via executeInGlobalWithBindings so bypassCSP scopes the call (Debugger.Object.apply has no bypassCSP option).
+    const callBindings = {};
+    const argNames = [];
+    for (let i = 0; i < args.length; i++) {
+      const name = '__pwArg' + i;
+      callBindings[name] = args[i];
+      argNames.push(name);
+    }
+    let {success, obj} = this._getResult(this._debuggee.executeInGlobalWithBindings('(' + functionText + ')(' + argNames.join(',') + ')', callBindings, {useInnerBindings: true, bypassCSP: true}), exceptionDetails);
     userInputHelper && userInputHelper.destruct();
     if (!success)
       return null;
@@ -415,12 +451,6 @@ class ExecutionContext {
     return this._createRemoteObject(debuggerObj);
   }
 
-  _instanceOf(debuggerObj, rawObj, className) {
-    if (this._domWindow)
-      return rawObj instanceof this._domWindow[className];
-    return this._debuggee.executeInGlobalWithBindings('o instanceof this[className]', {o: debuggerObj, className: this._debuggee.makeDebuggeeValue(className)}).return;
-  }
-
   _createRemoteObject(debuggerObj) {
     if (debuggerObj instanceof Debugger.Object) {
       const objectId = generateId();
@@ -428,36 +458,33 @@ class ExecutionContext {
       const rawObj = debuggerObj.unsafeDereference();
       const type = typeof rawObj;
       let subtype = undefined;
-      if (debuggerObj.isProxy)
+      if (debuggerObj.isProxy) {
         subtype = 'proxy';
-      else if (Array.isArray(rawObj))
-        subtype = 'array';
-      else if (Object.is(rawObj, null))
-        subtype = 'null';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Node'))
+      } else if (typeof Node !== 'undefined' && Node.isInstance(rawObj)) {
         subtype = 'node';
-      else if (this._instanceOf(debuggerObj, rawObj, 'RegExp'))
-        subtype = 'regexp';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Date'))
-        subtype = 'date';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Map'))
-        subtype = 'map';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Set'))
-        subtype = 'set';
-      else if (this._instanceOf(debuggerObj, rawObj, 'WeakMap'))
-        subtype = 'weakmap';
-      else if (this._instanceOf(debuggerObj, rawObj, 'WeakSet'))
-        subtype = 'weakset';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Error'))
-        subtype = 'error';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Promise'))
-        subtype = 'promise';
-      else if ((this._instanceOf(debuggerObj, rawObj, 'Int8Array')) || (this._instanceOf(debuggerObj, rawObj, 'Uint8Array')) ||
-               (this._instanceOf(debuggerObj, rawObj, 'Uint8ClampedArray')) || (this._instanceOf(debuggerObj, rawObj, 'Int16Array')) ||
-               (this._instanceOf(debuggerObj, rawObj, 'Uint16Array')) || (this._instanceOf(debuggerObj, rawObj, 'Int32Array')) ||
-               (this._instanceOf(debuggerObj, rawObj, 'Uint32Array')) || (this._instanceOf(debuggerObj, rawObj, 'Float32Array')) ||
-               (this._instanceOf(debuggerObj, rawObj, 'Float64Array'))) {
-        subtype = 'typedarray';
+      } else {
+        switch (debuggerObj.class) {
+          case 'Array': subtype = 'array'; break;
+          case 'RegExp': subtype = 'regexp'; break;
+          case 'Date': subtype = 'date'; break;
+          case 'Map': subtype = 'map'; break;
+          case 'Set': subtype = 'set'; break;
+          case 'WeakMap': subtype = 'weakmap'; break;
+          case 'WeakSet': subtype = 'weakset'; break;
+          case 'Error': subtype = 'error'; break;
+          case 'Promise': subtype = 'promise'; break;
+          case 'Int8Array':
+          case 'Uint8Array':
+          case 'Uint8ClampedArray':
+          case 'Int16Array':
+          case 'Uint16Array':
+          case 'Int32Array':
+          case 'Uint32Array':
+          case 'Float32Array':
+          case 'Float64Array':
+            subtype = 'typedarray';
+            break;
+        }
       }
       return {objectId, type, subtype};
     }
@@ -508,7 +535,7 @@ class ExecutionContext {
   }
 
   _serialize(obj) {
-    const result = this._debuggee.executeInGlobalWithBindings('stringify(e)', {e: obj, stringify: this._jsonStringifyObject});
+    const result = this._debuggee.executeInGlobalWithBindings('stringify(e)', {e: obj, stringify: this._jsonStringifyObject}, {useInnerBindings: true});
     if (result.throw)
       throw new Error('Object is not serializable');
     return result.return === undefined ? undefined : JSON.parse(result.return);
@@ -537,15 +564,13 @@ class ExecutionContext {
   }
 
   _getResult(completionValue, exceptionDetails = {}) {
-    if (!completionValue) {
-      exceptionDetails.text = 'Evaluation terminated!';
-      exceptionDetails.stack = '';
-      return {success: false, obj: null};
-    }
+    if (!completionValue)
+      throw new Error('evaluation terminated');
     if (completionValue.throw) {
-      if (this._debuggee.executeInGlobalWithBindings('e instanceof Error', {e: completionValue.throw}).return) {
-        exceptionDetails.text = this._debuggee.executeInGlobalWithBindings('e.message', {e: completionValue.throw}).return;
-        exceptionDetails.stack = this._debuggee.executeInGlobalWithBindings('e.stack', {e: completionValue.throw}).return;
+      const errorInfo = this._debuggee.executeInGlobalWithBindings('e instanceof Error ? ({m: e.message, s: e.stack}) : null', {e: completionValue.throw}, {useInnerBindings: true}).return;
+      if (errorInfo) {
+        exceptionDetails.text = errorInfo.getOwnPropertyDescriptor('m').value;
+        exceptionDetails.stack = errorInfo.getOwnPropertyDescriptor('s').value;
       } else {
         exceptionDetails.value = this._serialize(completionValue.throw);
       }
@@ -576,5 +601,5 @@ function emitEvent(event, ...args) {
     listener.call(null, ...args);
 }
 
-var EXPORTED_SYMBOLS = ['Runtime'];
-this.Runtime = Runtime;
+// Export Runtime to global.
+globalThis.Runtime = Runtime;

@@ -1,7 +1,7 @@
 /**
  * Copyright (c) Microsoft Corporation.
  *
- * Licensed under the Apache License, Version 2.0 (the 'License");
+ * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-const {blobServiceClient, gunzipAsync, deleteBlob} = require('./utils.js');
+const {gunzipAsync, deleteBlob} = require('./utils.js');
 const {processDashboardRaw} = require('./dashboard_raw.js');
 const {processDashboardCompressedV1} = require('./dashboard_compressed_v1.js');
 

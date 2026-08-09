@@ -14,48 +14,95 @@
   limitations under the License.
 */
 
-import type { HTMLReport, TestFileSummary } from '@playwright/test/src/reporters/html';
+import type { FilteredStats, HTMLReport, TestFileSummary } from './types';
 import * as React from 'react';
-import { Filter } from './filter';
 import { TestFileView } from './testFileView';
 import './testFileView.css';
+import './chip.css';
+import { msToString } from '@isomorphic/formatUtils';
+import { Chip } from './chip';
+import { CodeSnippet } from './testErrorView';
+import * as icons from './icons';
+import { isMetadataEmpty, MetadataView } from './metadataView';
+import { HeaderView } from './headerView';
+import { clsx } from '@web/uiUtils';
 
 export const TestFilesView: React.FC<{
-  report?: HTMLReport,
+  files: TestFileSummary[],
   expandedFiles: Map<string, boolean>,
   setExpandedFiles: (value: Map<string, boolean>) => void,
-  filter: Filter,
-}> = ({ report, filter, expandedFiles, setExpandedFiles }) => {
+  projectNames: string[],
+}> = ({ files, expandedFiles, setExpandedFiles, projectNames }) => {
   const filteredFiles = React.useMemo(() => {
     const result: { file: TestFileSummary, defaultExpanded: boolean }[] = [];
     let visibleTests = 0;
-    for (const file of report?.files || []) {
-      const tests = file.tests.filter(t => filter.matches(t));
-      visibleTests += tests.length;
-      if (tests.length)
-        result.push({ file, defaultExpanded: visibleTests < 200 });
+    for (const file of files) {
+      visibleTests += file.tests.length;
+      result.push({ file, defaultExpanded: visibleTests < 200 });
     }
     return result;
-  }, [report, filter]);
+  }, [files]);
   return <>
-    {report && filteredFiles.map(({ file, defaultExpanded }) => {
-      return <TestFileView
-        key={`file-${file.fileId}`}
-        report={report}
-        file={file}
-        isFileExpanded={fileId => {
-          const value = expandedFiles.get(fileId);
-          if (value === undefined)
-            return defaultExpanded;
-          return !!value;
-        }}
-        setFileExpanded={(fileId, expanded) => {
-          const newExpanded = new Map(expandedFiles);
-          newExpanded.set(fileId, expanded);
-          setExpandedFiles(newExpanded);
-        }}
-        filter={filter}>
-      </TestFileView>;
-    })}
+    {filteredFiles.length > 0 ?
+      filteredFiles.map(({ file, defaultExpanded }) => {
+        return <TestFileView
+          key={`file-${file.fileId}`}
+          file={file}
+          projectNames={projectNames}
+          isFileExpanded={fileId => {
+            const value = expandedFiles.get(fileId);
+            if (value === undefined)
+              return defaultExpanded;
+            return !!value;
+          }}
+          setFileExpanded={(fileId, expanded) => {
+            const newExpanded = new Map(expandedFiles);
+            newExpanded.set(fileId, expanded);
+            setExpandedFiles(newExpanded);
+          }}>
+        </TestFileView>;
+      })
+      : <div className='chip-header test-file-no-files'>No tests found</div>}
+  </>;
+};
+
+export const TestFilesHeader: React.FC<{
+  report: HTMLReport | undefined,
+  filteredStats?: FilteredStats,
+  metadataVisible: boolean,
+  toggleMetadataVisible: () => void,
+  errorsVisible: boolean,
+  setErrorsVisible: (visible: boolean) => void,
+}> = ({ report, filteredStats, metadataVisible, toggleMetadataVisible, errorsVisible, setErrorsVisible }) => {
+  if (!report)
+    return null;
+
+  const showProject = report.projectNames.length === 1 && !!report.projectNames[0];
+  const isMetadataInTopLine = !showProject && !filteredStats;
+
+  const metadataToggleButton = !isMetadataEmpty(report.metadata) && (
+    <div className={clsx('metadata-toggle', !isMetadataInTopLine && 'metadata-toggle-second-line')} role='button' onClick={toggleMetadataVisible} title={metadataVisible ? 'Hide metadata' : 'Show metadata'}>
+      {metadataVisible ? icons.downArrow() : icons.rightArrow()}Metadata
+    </div>
+  );
+
+  const leftSuperHeader = <div className='test-file-header-info'>
+    {showProject && <div data-testid='project-name'>Project: {report.projectNames[0]}</div>}
+    {filteredStats && <div data-testid='filtered-tests-count'>Filtered: {filteredStats.total} {!!filteredStats.total && ('(' + msToString(filteredStats.duration) + ')')}</div>}
+    {isMetadataInTopLine && metadataToggleButton}
+  </div>;
+
+  const rightSuperHeader = <>
+    <div data-testid='overall-time' style={{ marginRight: '10px' }}>{report ? new Date(report.startTime).toLocaleString() : ''}</div>
+    <div data-testid='overall-duration'>Total time: {msToString(report.duration ?? 0)}</div>
+  </>;
+
+  return <>
+    <HeaderView title={report.options.title} leftSuperHeader={leftSuperHeader} rightSuperHeader={rightSuperHeader} />
+    {!isMetadataInTopLine && metadataToggleButton}
+    {metadataVisible && <MetadataView metadata={report.metadata}/>}
+    {!!report.errors.length && <Chip header='Errors' dataTestId='report-errors' expanded={errorsVisible} setExpanded={setErrorsVisible}>
+      {report.errors.map((error, index) => <CodeSnippet key={'test-report-error-message-' + index} code={error}/>)}
+    </Chip>}
   </>;
 };

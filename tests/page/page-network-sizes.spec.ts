@@ -20,6 +20,8 @@ import zlib from 'zlib';
 
 import { test as it, expect } from './pageTest';
 
+it.skip(({ isElectron, browserMajorVersion }) => isElectron && browserMajorVersion < 99, 'This needs Chromium >= 99');
+
 it('should set bodySize and headersSize', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   const [request] = await Promise.all([
@@ -39,7 +41,7 @@ it('should set bodySize to 0 if there was no body', async ({ page, server, brows
   ]);
   const sizes = await request.sizes();
   expect(sizes.requestBodySize).toBe(0);
-  expect(sizes.requestHeadersSize).toBeGreaterThanOrEqual(200);
+  expect(sizes.requestHeadersSize).toBeGreaterThanOrEqual(190);
 });
 
 it('should set bodySize, headersSize, and transferSize', async ({ page, server }) => {

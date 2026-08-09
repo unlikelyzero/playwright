@@ -14,41 +14,62 @@
  * limitations under the License.
  */
 
-import * as http from 'http';
-import * as https from 'https';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { Progress, ProgressController } from './progress';
-import { SocksProxyAgent } from 'socks-proxy-agent';
-import { pipeline, Readable, Transform } from 'stream';
-import url from 'url';
-import zlib from 'zlib';
-import { HTTPCredentials } from '../../types/types';
-import * as channels from '../protocol/channels';
-import { TimeoutSettings } from '../utils/timeoutSettings';
-import { assert, createGuid, getUserAgent, monotonicTime } from '../utils/utils';
-import { BrowserContext } from './browserContext';
-import { CookieStore, domainMatches } from './cookieStore';
+import http from 'http';
+import https from 'https';
+import { Transform, pipeline } from 'stream';
+import { TLSSocket } from 'tls';
+import * as zlib from 'zlib';
+
+import { createGuid } from '@utils/crypto';
+import { httpHappyEyeballsAgent, httpsHappyEyeballsAgent, timingForSocket } from '@utils/happyEyeballs';
+import { assert } from '@isomorphic/assert';
+import { constructURLBasedOnBaseURL } from '@isomorphic/urlMatch';
+import { eventsHelper } from '@utils/eventsHelper';
+import { monotonicTime } from '@isomorphic/time';
+import { createProxyAgent } from '@utils/network';
+import { getUserAgent } from './userAgent';
+import { BrowserContext, findMatchingHttpCredentials, verifyClientCertificates } from './browserContext';
+import { Cookie, CookieStore, domainMatches, parseRawCookie } from './cookieStore';
 import { MultipartFormData } from './formData';
-import { CallMetadata, SdkObject } from './instrumentation';
-import { Playwright } from './playwright';
-import * as types from './types';
-import { HeadersArray, ProxySettings } from './types';
+import { TargetClosedError } from './errors';
+import { SdkObject } from './instrumentation';
+import { isAbortError } from './progress';
+import { getMatchingTLSOptionsForOrigin, rewriteOpenSSLErrorIfNeeded } from './socksClientCertificatesInterceptor';
+import { Tracing } from './trace/recorder/tracing';
+
+import type net from 'net';
+
+import type { Playwright } from './playwright';
+import type { Progress } from './progress';
+import type * as types from './types';
+import type { HeadersArray, ProxySettings } from './types';
+import type { HttpCredentials } from '@protocol/structs';
+import type { RegisteredListener } from '@utils/eventsHelper';
+import type * as channels from './channels';
+import type * as har from '@trace/har';
+import type { LookupAddress } from 'dns';
+import type { Readable, TransformCallback } from 'stream';
+
 
 type FetchRequestOptions = {
   userAgent: string;
   extraHTTPHeaders?: HeadersArray;
-  httpCredentials?: HTTPCredentials;
+  failOnStatusCode?: boolean;
+  httpCredentials?: HttpCredentials[];
   proxy?: ProxySettings;
-  timeoutSettings: TimeoutSettings;
   ignoreHTTPSErrors?: boolean;
+  maxRedirects?: number;
   baseURL?: string;
+  clientCertificates?: types.BrowserContextOptions['clientCertificates'];
 };
+
+type HeadersObject = Readonly<{ [name: string]: string }>;
 
 export type APIRequestEvent = {
   url: URL,
   method: string,
-  headers: { [name: string]: string },
-  cookies: types.NameValueList,
+  headers: HeadersObject,
+  cookies: channels.NameValue[],
   postData?: Buffer
 };
 
@@ -56,11 +77,27 @@ export type APIRequestFinishedEvent = {
   requestEvent: APIRequestEvent,
   httpVersion: string;
   headers: http.IncomingHttpHeaders;
-  cookies: types.NetworkCookie[];
+  cookies: channels.NetworkCookie[];
   rawHeaders: string[];
   statusCode: number;
   statusMessage: string;
   body?: Buffer;
+  timings: har.Timings;
+  serverIPAddress?: string;
+  serverPort?: number;
+  securityDetails?: har.SecurityDetails;
+};
+
+type SendRequestOptions = https.RequestOptions & {
+  maxRedirects: number,
+  headers: HeadersObject,
+  __testHookLookup?: (hostname: string) => LookupAddress[]
+};
+
+type SendRequestResult = {
+  body: Buffer,
+  log: string[],
+  response: Omit<channels.APIResponse, 'fetchUid'>,
 };
 
 export abstract class APIRequestContext extends SdkObject {
@@ -74,6 +111,8 @@ export abstract class APIRequestContext extends SdkObject {
   readonly fetchResponses: Map<string, Buffer> = new Map();
   readonly fetchLog: Map<string, string[]> = new Map();
   protected static allInstances: Set<APIRequestContext> = new Set();
+  _closeReason: string | undefined;
+  private _disposed = false;
 
   static findResponseBody(guid: string): Buffer | undefined {
     for (const request of APIRequestContext.allInstances) {
@@ -85,28 +124,44 @@ export abstract class APIRequestContext extends SdkObject {
   }
 
   constructor(parent: SdkObject) {
-    super(parent, 'fetchRequest');
+    super(parent, 'request-context');
     APIRequestContext.allInstances.add(this);
   }
 
+  abstract storageState(progress: Progress, indexedDB?: boolean): Promise<channels.APIRequestContextStorageStateResult>;
+
+  fetchResponseBody(progress: Progress, fetchUid: string): Buffer | undefined {
+    return this.fetchResponses.get(fetchUid);
+  }
+
+  fetchLogForUid(progress: Progress, fetchUid: string): string[] {
+    return this.fetchLog.get(fetchUid) || [];
+  }
+
+  disposeResponse(progress: Progress, fetchUid: string) {
+    this._disposeResponse(fetchUid);
+  }
+
+  abstract tracing(): Tracing;
+
+  abstract dispose(options: { reason?: string }): Promise<void>;
+
+  abstract _defaultOptions(): FetchRequestOptions;
+  abstract addCookies(cookies: channels.NetworkCookie[]): Promise<void>;
+  abstract cookies(progress: Progress, url: URL): Promise<channels.NetworkCookie[]>;
+
   protected _disposeImpl() {
+    this._disposed = true;
     APIRequestContext.allInstances.delete(this);
     this.fetchResponses.clear();
     this.fetchLog.clear();
     this.emit(APIRequestContext.Events.Dispose);
   }
 
-  disposeResponse(fetchUid: string) {
+  _disposeResponse(fetchUid: string) {
     this.fetchResponses.delete(fetchUid);
     this.fetchLog.delete(fetchUid);
   }
-
-  abstract dispose(): void;
-
-  abstract _defaultOptions(): FetchRequestOptions;
-  abstract _addCookies(cookies: types.NetworkCookie[]): Promise<void>;
-  abstract _cookies(url: URL): Promise<types.NetworkCookie[]>;
-  abstract storageState(): Promise<channels.APIRequestContextStorageStateResult>;
 
   private _storeResponseBody(body: Buffer): string {
     const uid = createGuid();
@@ -114,97 +169,96 @@ export abstract class APIRequestContext extends SdkObject {
     return uid;
   }
 
-  async fetch(params: channels.APIRequestContextFetchParams, metadata: CallMetadata): Promise<Omit<types.APIResponse, 'body'> & { fetchUid: string }> {
-    const headers: { [name: string]: string } = {};
+  async fetch(progress: Progress, params: channels.APIRequestContextFetchParams): Promise<channels.APIResponse> {
     const defaults = this._defaultOptions();
-    headers['user-agent'] = defaults.userAgent;
-    headers['accept'] = '*/*';
-    headers['accept-encoding'] = 'gzip,deflate,br';
+    const headers: HeadersObject = {
+      'user-agent': defaults.userAgent,
+      'accept': '*/*',
+      'accept-encoding': 'gzip,deflate,br',
+    };
 
     if (defaults.extraHTTPHeaders) {
       for (const { name, value } of defaults.extraHTTPHeaders)
-        headers[name.toLowerCase()] = value;
+        setHeader(headers, name, value);
     }
 
     if (params.headers) {
       for (const { name, value } of params.headers)
-        headers[name.toLowerCase()] = value;
+        setHeader(headers, name, value);
     }
+
+    const requestUrl = new URL(constructURLBasedOnBaseURL(defaults.baseURL, params.url));
+    if (params.encodedParams) {
+      requestUrl.search = params.encodedParams;
+    } else if (params.params) {
+      for (const { name, value } of params.params)
+        requestUrl.searchParams.append(name, value);
+    }
+
+    const credentials = this._getHttpCredentials(requestUrl);
+    if (credentials?.send === 'always')
+      setBasicAuthorizationHeader(headers, credentials);
 
     const method = params.method?.toUpperCase() || 'GET';
     const proxy = defaults.proxy;
     let agent;
-    if (proxy) {
-      // TODO: support bypass proxy
-      const proxyOpts = url.parse(proxy.server);
-      if (proxyOpts.protocol?.startsWith('socks')) {
-        agent = new SocksProxyAgent({
-          host: proxyOpts.hostname,
-          port: proxyOpts.port || undefined,
-        });
-      } else {
-        if (proxy.username)
-          proxyOpts.auth = `${proxy.username}:${proxy.password || ''}`;
-        agent = new HttpsProxyAgent(proxyOpts);
-      }
-    }
+    // We skip 'per-context' in order to not break existing users. 'per-context' was previously used to
+    // workaround an upstream Chromium bug. Can be removed in the future.
+    if (proxy?.server !== 'per-context')
+      agent = createProxyAgent(proxy, requestUrl);
 
-    const timeout = defaults.timeoutSettings.timeout(params);
-    const deadline = timeout && (monotonicTime() + timeout);
+    let maxRedirects = params.maxRedirects ?? (defaults.maxRedirects ?? 20);
+    maxRedirects = maxRedirects === 0 ? -1 : maxRedirects;
 
-    const options: https.RequestOptions & { maxRedirects: number, deadline: number } = {
+    const options: SendRequestOptions = {
       method,
       headers,
       agent,
-      maxRedirects: 20,
-      timeout,
-      deadline
+      maxRedirects,
+      ...getMatchingTLSOptionsForOrigin(this._defaultOptions().clientCertificates, requestUrl.origin),
+      __testHookLookup: (params as any).__testHookLookup,
     };
-    // rejectUnauthorized = undefined is treated as true in node 12.
+    // rejectUnauthorized = undefined is treated as true in Node.js 12.
     if (params.ignoreHTTPSErrors || defaults.ignoreHTTPSErrors)
       options.rejectUnauthorized = false;
 
-    const requestUrl = new URL(params.url, defaults.baseURL);
-    if (params.params) {
-      for (const { name, value } of params.params)
-        requestUrl.searchParams.set(name, value);
-    }
-
-    let postData: Buffer | undefined;
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method))
-      postData = serializePostData(params, headers);
-    else if (params.postData || params.jsonData || params.formData || params.multipartData)
-      throw new Error(`Method ${method} does not accept post data`);
+    const postData = serializePostData(params, headers);
     if (postData)
-      headers['content-length'] = String(postData.byteLength);
-    const controller = new ProgressController(metadata, this);
-    const fetchResponse = await controller.run(progress => {
-      return this._sendRequest(progress, requestUrl, options, postData);
-    });
-    const fetchUid = this._storeResponseBody(fetchResponse.body);
-    this.fetchLog.set(fetchUid, controller.metadata.log);
-    if (params.failOnStatusCode && (fetchResponse.status < 200 || fetchResponse.status >= 400))
-      throw new Error(`${fetchResponse.status} ${fetchResponse.statusText}`);
-    return { ...fetchResponse, fetchUid };
+      setHeader(headers, 'content-length', String(postData.byteLength));
+    const { body, log, response } = await this._sendRequestWithRetries(progress, requestUrl, options, postData, params.maxRetries);
+    const failOnStatusCode = params.failOnStatusCode !== undefined ? params.failOnStatusCode : !!defaults.failOnStatusCode;
+    if (failOnStatusCode && (response.status < 200 || response.status >= 400)) {
+      let responseText = '';
+      if (body.byteLength) {
+        let text = body.toString('utf8');
+        if (text.length > 1000)
+          text = text.substring(0, 997) + '...';
+        responseText = `\nResponse text:\n${text}`;
+      }
+      throw new Error(`${response.status} ${response.statusText}${responseText}`);
+    }
+    const fetchUid = this._storeResponseBody(body);
+    this.fetchLog.set(fetchUid, log);
+    return { ...response, fetchUid };
   }
 
-  private _parseSetCookieHeader(responseUrl: string, setCookie: string[] | undefined): types.NetworkCookie[] {
+  private _parseSetCookieHeader(responseUrl: string, setCookie: string[] | undefined): channels.NetworkCookie[] {
     if (!setCookie)
       return [];
     const url = new URL(responseUrl);
     // https://datatracker.ietf.org/doc/html/rfc6265#section-5.1.4
     const defaultPath = '/' + url.pathname.substr(1).split('/').slice(0, -1).join('/');
-    const cookies: types.NetworkCookie[] = [];
+    const cookies: channels.NetworkCookie[] = [];
     for (const header of setCookie) {
       // Decode cookie value?
-      const cookie: types.NetworkCookie | null = parseCookie(header);
+      const cookie: channels.NetworkCookie | null = parseCookie(header);
       if (!cookie)
         continue;
       // https://datatracker.ietf.org/doc/html/rfc6265#section-5.2.3
       if (!cookie.domain)
         cookie.domain = url.hostname;
       else
-        assert(cookie.domain.startsWith('.'));
+        assert(cookie.domain.startsWith('.') || !cookie.domain.includes('.'));
       if (!domainMatches(url.hostname, cookie.domain!))
         continue;
       // https://datatracker.ietf.org/doc/html/rfc6265#section-5.2.4
@@ -215,37 +269,136 @@ export abstract class APIRequestContext extends SdkObject {
     return cookies;
   }
 
-  private async _updateRequestCookieHeader(url: URL, options: http.RequestOptions) {
-    if (options.headers!['cookie'] !== undefined)
+  private async _updateRequestCookieHeader(progress: Progress, url: URL, headers: HeadersObject) {
+    if (getHeader(headers, 'cookie') !== undefined)
       return;
-    const cookies = await this._cookies(url);
+    const contextCookies = await this.cookies(progress, url);
+    // Browser context returns cookies with domain matching both .example.com and
+    // example.com. Those without leading dot are only sent when domain is strictly
+    // matching example.com, but not for sub.example.com.
+    const cookies = contextCookies.filter(c => new Cookie(c).matches(url));
     if (cookies.length) {
       const valueArray = cookies.map(c => `${c.name}=${c.value}`);
-      options.headers!['cookie'] = valueArray.join('; ');
+      setHeader(headers, 'cookie', valueArray.join('; '));
     }
   }
 
-  private async _sendRequest(progress: Progress, url: URL, options: https.RequestOptions & { maxRedirects: number, deadline: number }, postData?: Buffer): Promise<types.APIResponse>{
-    await this._updateRequestCookieHeader(url, options);
+  private async _sendRequestWithRetries(progress: Progress, url: URL, options: SendRequestOptions, postData?: Buffer, maxRetries?: number): Promise<SendRequestResult> {
+    const log: string[] = [];
+    maxRetries ??= 0;
+    let backoff = 250;
+    for (let i = 0; i <= maxRetries; i++) {
+      try {
+        return await this._sendRequest(progress, log, url, options, postData);
+      } catch (e) {
+        if (isAbortError(e))
+          throw e;
+        e = rewriteOpenSSLErrorIfNeeded(e);
+        if (maxRetries === 0)
+          throw e;
+        if (i === maxRetries)
+          throw new Error(`Failed after ${i + 1} attempt(s): ${e}`);
+        // Retry on connection reset only.
+        if (e.code !== 'ECONNRESET')
+          throw e;
+        const message = `  Received ECONNRESET, will retry after ${backoff}ms.`;
+        log.push(message);
+        progress.log(message);
+        await progress.wait(backoff);
+        backoff *= 2;
+      }
+    }
+    throw new Error('Unreachable');
+  }
 
-    const requestCookies = (options.headers!['cookie'] as (string | undefined))?.split(';').map(p => {
-      const [name, value] = p.split('=').map(v => v.trim());
+  private async _sendRequest(progress: Progress, log: string[], url: URL, options: SendRequestOptions, postData?: Buffer): Promise<SendRequestResult>{
+    const fetchLog = (message: string) => {
+      log.push(message);
+      progress.log(message);
+    };
+    await this._updateRequestCookieHeader(progress, url, options.headers);
+
+    const requestCookies = getHeader(options.headers, 'cookie')?.split(';').map(p => {
+      const indexOfEquals = p.indexOf('=');
+      const name = indexOfEquals !== -1 ? p.substring(0, indexOfEquals).trim() : p.trim();
+      const value = indexOfEquals !== -1 ? p.substring(indexOfEquals + 1).trim() : '';
       return { name, value };
     }) || [];
     const requestEvent: APIRequestEvent = {
       url,
       method: options.method!,
-      headers: options.headers as { [name: string]: string },
+      headers: options.headers,
       cookies: requestCookies,
       postData
     };
     this.emit(APIRequestContext.Events.Request, requestEvent);
 
-    return new Promise<types.APIResponse>((fulfill, reject) => {
+    if (this._disposed)
+      throw new TargetClosedError(this._closeReason || 'Request context disposed.');
+
+    let destroyRequest: (() => void) | undefined;
+    progress.setAllowConcurrentOrNestedRaces(true);
+    const resultPromise = new Promise<SendRequestResult>((fulfill, reject) => {
       const requestConstructor: ((url: URL, options: http.RequestOptions, callback?: (res: http.IncomingMessage) => void) => http.ClientRequest)
         = (url.protocol === 'https:' ? https : http).request;
-      const request = requestConstructor(url, options, async response => {
+      // If we have a proxy agent already, do not override it.
+      const agent = options.agent || (url.protocol === 'https:' ? httpsHappyEyeballsAgent : httpHappyEyeballsAgent);
+      const requestOptions = { ...options, agent };
+
+      const startAt = monotonicTime();
+      const startAtWallTime = Date.now();
+      let reusedSocketAt: number | undefined;
+      let dnsLookupAt: number | undefined;
+      let tcpConnectionAt: number | undefined;
+      let tlsHandshakeAt: number | undefined;
+      let requestFinishAt: number | undefined;
+      let serverIPAddress: string | undefined;
+      let serverPort: number | undefined;
+
+      let securityDetails: har.SecurityDetails | undefined;
+      let responseReceived = false;
+
+      const listeners: RegisteredListener[] = [];
+
+      const handleRequestError = (error: Error) => {
+        // Write errors after we received a response are swallowed, following undici behaviour:
+        // https://github.com/nodejs/undici/blob/01a912e49a50c48009ed2639d2a457a6ec26752a/lib/dispatcher/client-h1.js#L735
+        if (responseReceived && isNetworkConnectionError(error))
+          return;
+        reject(error);
+      };
+
+      const request = requestConstructor(url, requestOptions as any, async response => {
+        responseReceived = true;
+        const responseAt = monotonicTime();
+
         const notifyRequestFinished = (body?: Buffer) => {
+          const endAt = monotonicTime();
+          // spec: http://www.softwareishard.com/blog/har-12-spec/#timings
+          const connectEnd = tlsHandshakeAt ?? tcpConnectionAt;
+          const timings: har.Timings = {
+            send: requestFinishAt! - startAt,
+            wait: responseAt - requestFinishAt!,
+            receive: endAt - responseAt,
+            dns: dnsLookupAt ? dnsLookupAt - startAt : -1,
+            connect: connectEnd ? connectEnd - startAt : -1, // "If [ssl] is defined then the time is also included in the connect field "
+            ssl: tlsHandshakeAt ? tlsHandshakeAt - tcpConnectionAt! : -1,
+            blocked: reusedSocketAt ? reusedSocketAt - startAt : -1,
+          };
+
+          // spec: https://developer.mozilla.org/en-US/docs/Web/API/PerformanceResourceTiming
+          const requestStartAt = connectEnd ?? reusedSocketAt;
+          const resourceTiming: channels.ResourceTiming = {
+            startTime: startAtWallTime,
+            domainLookupStart: dnsLookupAt ? 0 : -1,
+            domainLookupEnd: dnsLookupAt ? dnsLookupAt - startAt : -1,
+            connectStart: tcpConnectionAt ? (dnsLookupAt ?? startAt) - startAt : -1,
+            secureConnectionStart: tlsHandshakeAt && tcpConnectionAt ? tcpConnectionAt - startAt : -1,
+            connectEnd: connectEnd ? connectEnd - startAt : -1,
+            requestStart: requestStartAt ? requestStartAt - startAt : -1,
+            responseStart: responseAt - startAt,
+          };
+
           const requestFinishedEvent: APIRequestFinishedEvent = {
             requestEvent,
             httpVersion: response.httpVersion,
@@ -254,26 +407,38 @@ export abstract class APIRequestContext extends SdkObject {
             headers: response.headers,
             rawHeaders: response.rawHeaders,
             cookies,
-            body
+            body,
+            timings,
+            serverIPAddress,
+            serverPort,
+            securityDetails,
           };
           this.emit(APIRequestContext.Events.RequestFinished, requestFinishedEvent);
+          return { resourceTiming, responseEndTiming: endAt - startAt };
         };
-        progress.log(`← ${response.statusCode} ${response.statusMessage}`);
+        fetchLog(`← ${response.statusCode} ${response.statusMessage}`);
         for (const [name, value] of Object.entries(response.headers))
-          progress.log(`  ${name}: ${value}`);
+          fetchLog(`  ${name}: ${value}`);
 
         const cookies = this._parseSetCookieHeader(response.url || url.toString(), response.headers['set-cookie']) ;
-        if (cookies.length)
-          await this._addCookies(cookies);
+        if (cookies.length) {
+          try {
+            await this.addCookies(cookies);
+          } catch (e) {
+            // Cookie value is limited by 4096 characters in the browsers. If setCookies failed,
+            // we try setting each cookie individually just in case only some of them are bad.
+            await Promise.all(cookies.map(c => this.addCookies([c]).catch(() => {})));
+          }
+        }
 
-        if (redirectStatus.includes(response.statusCode!)) {
-          if (!options.maxRedirects) {
+        if (redirectStatus.includes(response.statusCode!) && options.maxRedirects >= 0) {
+          if (options.maxRedirects === 0) {
             reject(new Error('Max redirect count exceeded'));
             request.destroy();
             return;
           }
           const headers = { ...options.headers };
-          delete headers[`cookie`];
+          removeHeader(headers, `cookie`);
 
           // HTTP-redirect fetch step 13 (https://fetch.spec.whatwg.org/#http-redirect-fetch)
           const status = response.statusCode!;
@@ -282,116 +447,230 @@ export abstract class APIRequestContext extends SdkObject {
               status === 303 && !['GET', 'HEAD'].includes(method)) {
             method = 'GET';
             postData = undefined;
-            delete headers[`content-encoding`];
-            delete headers[`content-language`];
-            delete headers[`content-length`];
-            delete headers[`content-location`];
-            delete headers[`content-type`];
+            removeHeader(headers, `content-encoding`);
+            removeHeader(headers, `content-language`);
+            removeHeader(headers, `content-length`);
+            removeHeader(headers, `content-location`);
+            removeHeader(headers, `content-type`);
           }
 
-          const redirectOptions: https.RequestOptions & { maxRedirects: number, deadline: number } = {
+
+          const redirectOptions: SendRequestOptions = {
             method,
             headers,
             agent: options.agent,
             maxRedirects: options.maxRedirects - 1,
-            timeout: options.timeout,
-            deadline: options.deadline
+            __testHookLookup: options.__testHookLookup,
           };
           // rejectUnauthorized = undefined is treated as true in node 12.
           if (options.rejectUnauthorized === false)
             redirectOptions.rejectUnauthorized = false;
 
           // HTTP-redirect fetch step 4: If locationURL is null, then return response.
-          if (response.headers.location) {
-            const locationURL = new URL(response.headers.location, url);
+          // Best-effort UTF-8 decoding, per spec it's US-ASCII only, but browsers are more lenient.
+          // Node.js parses it as Latin1 via std::v8::String, so we convert it to UTF-8.
+          const locationHeaderValue = Buffer.from(response.headers.location ?? '', 'latin1').toString('utf8');
+          if (locationHeaderValue) {
+            let locationURL;
+            try {
+              locationURL = new URL(locationHeaderValue, url);
+            } catch (error) {
+              reject(new Error(`uri requested responds with an invalid redirect URL: ${locationHeaderValue}`));
+              request.destroy();
+              return;
+            }
+
+            setHeader(headers, 'host', locationURL.host);
+
+            // Drop credentials scoped to the original origin on cross-origin redirects.
+            if (locationURL.origin !== url.origin)
+              removeHeader(headers, 'authorization');
+
+            // Client certificates are origin-scoped — pick them based on the redirect
+            // target, not the original URL.
+            Object.assign(redirectOptions,
+                getMatchingTLSOptionsForOrigin(this._defaultOptions().clientCertificates, locationURL.origin));
+
             notifyRequestFinished();
-            fulfill(this._sendRequest(progress, locationURL, redirectOptions, postData));
+            fulfill(this._sendRequest(progress, log, locationURL, redirectOptions, postData));
             request.destroy();
             return;
           }
         }
-        if (response.statusCode === 401 && !options.headers!['authorization']) {
+        if (response.statusCode === 401 && !getHeader(options.headers, 'authorization')) {
           const auth = response.headers['www-authenticate'];
-          const credentials = this._defaultOptions().httpCredentials;
+          const credentials = this._getHttpCredentials(url);
           if (auth?.trim().startsWith('Basic') && credentials) {
-            const { username, password } = credentials;
-            const encoded = Buffer.from(`${username || ''}:${password || ''}`).toString('base64');
-            options.headers!['authorization'] = `Basic ${encoded}`;
+            setBasicAuthorizationHeader(options.headers, credentials);
             notifyRequestFinished();
-            fulfill(this._sendRequest(progress, url, options, postData));
+            fulfill(this._sendRequest(progress, log, url, options, postData));
             request.destroy();
             return;
           }
         }
-        response.on('aborted', () => reject(new Error('aborted')));
+        const chunks: Buffer[] = [];
+        const notifyBodyFinished = () => {
+          const body = Buffer.concat(chunks);
+          const { resourceTiming, responseEndTiming } = notifyRequestFinished(body);
+          fulfill({
+            body,
+            log,
+            response: {
+              url: response.url || url.toString(),
+              status: response.statusCode || 0,
+              statusText: response.statusMessage || '',
+              headers: toHeadersArray(response.rawHeaders),
+              securityDetails,
+              serverAddr: serverIPAddress !== undefined && serverPort !== undefined ? { ipAddress: serverIPAddress, port: serverPort } : undefined,
+              timing: resourceTiming,
+              responseEndTiming,
+            },
+          });
+        };
 
         let body: Readable = response;
         let transform: Transform | undefined;
-        const encoding = response.headers['content-encoding'];
+        const encoding = response.headers['content-encoding']?.toLowerCase();
         if (encoding === 'gzip' || encoding === 'x-gzip') {
           transform = zlib.createGunzip({
             flush: zlib.constants.Z_SYNC_FLUSH,
             finishFlush: zlib.constants.Z_SYNC_FLUSH
           });
         } else if (encoding === 'br') {
-          transform = zlib.createBrotliDecompress();
+          transform = zlib.createBrotliDecompress({
+            flush: zlib.constants.BROTLI_OPERATION_FLUSH,
+            finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH
+          });
         } else if (encoding === 'deflate') {
           transform = zlib.createInflate();
         }
         if (transform) {
-          body = pipeline(response, transform, e => {
-            if (e)
+          // Brotli and deflate decompressors throw if the input stream is empty.
+          const emptyStreamTransform = new SafeEmptyStreamTransform(notifyBodyFinished);
+          body = pipeline(response, emptyStreamTransform, transform, e => {
+            if (e) {
+              if (isNetworkConnectionError(e))
+                reject(e);
+              else
+                reject(new Error(`failed to decompress '${encoding}' encoding: ${e.message}`));
+            }
+          });
+          body.on('error', e => {
+            if (isNetworkConnectionError(e))
+              reject(e);
+            else
               reject(new Error(`failed to decompress '${encoding}' encoding: ${e}`));
           });
+        } else {
+          response.on('aborted', () => reject(new Error('aborted')));
+          body.on('error', reject);
         }
 
-        const chunks: Buffer[] = [];
         body.on('data', chunk => chunks.push(chunk));
-        body.on('end', () => {
-          const body = Buffer.concat(chunks);
-          notifyRequestFinished(body);
-          fulfill({
-            url: response.url || url.toString(),
-            status: response.statusCode || 0,
-            statusText: response.statusMessage || '',
-            headers: toHeadersArray(response.rawHeaders),
-            body
-          });
-        });
-        body.on('error',reject);
+        body.on('end', notifyBodyFinished);
       });
-      request.on('error', reject);
+      request.on('error', handleRequestError);
+      destroyRequest = () => request.destroy();
 
-      const disposeListener = () => {
-        reject(new Error('Request context disposed.'));
-        request.destroy();
-      };
-      this.on(APIRequestContext.Events.Dispose, disposeListener);
-      request.on('close', () => this.off(APIRequestContext.Events.Dispose, disposeListener));
+      listeners.push(
+          eventsHelper.addEventListener(this, APIRequestContext.Events.Dispose, () => {
+            reject(new TargetClosedError(this._closeReason || 'Request context disposed.'));
+            request.destroy();
+          })
+      );
+      request.on('close', () => eventsHelper.removeEventListeners(listeners));
 
-      progress.log(`→ ${options.method} ${url.toString()}`);
-      if (options.headers) {
-        for (const [name, value] of Object.entries(options.headers))
-          progress.log(`  ${name}: ${value}`);
-      }
-
-      if (options.deadline) {
-        const rejectOnTimeout = () =>  {
-          reject(new Error(`Request timed out after ${options.timeout}ms`));
-          request.destroy();
+      const captureSecurityDetails = (socket: net.Socket) => {
+        if (!(socket instanceof TLSSocket))
+          return;
+        const peerCertificate = socket.getPeerCertificate();
+        // Multi-value RDNs are reported as string arrays, take the first common name.
+        const commonName = (field: string | string[] | undefined) => Array.isArray(field) ? field[0] : field;
+        securityDetails = {
+          protocol: socket.getProtocol() ?? undefined,
+          subjectName: commonName(peerCertificate.subject?.CN),
+          validFrom: new Date(peerCertificate.valid_from).getTime() / 1000,
+          validTo: new Date(peerCertificate.valid_to).getTime() / 1000,
+          issuer: commonName(peerCertificate.issuer?.CN)
         };
-        const remaining = options.deadline - monotonicTime();
-        if (remaining <= 0) {
-          rejectOnTimeout();
+      };
+
+      request.on('socket', socket => {
+        serverIPAddress = socket.remoteAddress;
+        serverPort = socket.remotePort;
+
+        socket.on('error', handleRequestError);
+        // Drop on keep-alive reuse so listeners do not accumulate. Keep if destroyed:
+        // a late write EPIPE may still fire after a refused-body reset.
+        request.once('close', () => {
+          if (!socket.destroyed)
+            socket.off('error', handleRequestError);
+        });
+
+        if (request.reusedSocket) {
+          reusedSocketAt = monotonicTime();
+          captureSecurityDetails(socket);
           return;
         }
-        request.setTimeout(remaining, rejectOnTimeout);
+
+        // happy eyeballs don't emit lookup and connect events, so we use our custom ones
+        const happyEyeBallsTimings = timingForSocket(socket);
+        dnsLookupAt = happyEyeBallsTimings.dnsLookupAt;
+        tcpConnectionAt = happyEyeBallsTimings.tcpConnectionAt;
+
+        // non-happy-eyeballs sockets
+        listeners.push(
+            eventsHelper.addEventListener(socket, 'lookup', () => { dnsLookupAt = monotonicTime(); }),
+            eventsHelper.addEventListener(socket, 'connect', () => { tcpConnectionAt = monotonicTime(); }),
+            eventsHelper.addEventListener(socket, 'secureConnect', () => {
+              tlsHandshakeAt = monotonicTime();
+              captureSecurityDetails(socket);
+            }),
+        );
+      });
+      request.on('finish', () => { requestFinishAt = monotonicTime(); });
+
+      fetchLog(`→ ${options.method} ${url.toString()}`);
+      if (options.headers) {
+        for (const [name, value] of Object.entries(options.headers))
+          fetchLog(`  ${name}: ${value}`);
       }
 
       if (postData)
         request.write(postData);
       request.end();
     });
+
+    return progress.race(resultPromise).catch(error => {
+      destroyRequest?.();
+      throw error;
+    }).finally(() => {
+      progress.setAllowConcurrentOrNestedRaces(false);
+    });
+  }
+
+  private _getHttpCredentials(url: URL) {
+    return findMatchingHttpCredentials(this._defaultOptions().httpCredentials, url.toString());
+  }
+}
+
+class SafeEmptyStreamTransform extends Transform {
+  private _receivedSomeData: boolean = false;
+  private _onEmptyStreamCallback: () => void;
+
+  constructor(onEmptyStreamCallback: () => void) {
+    super();
+    this._onEmptyStreamCallback = onEmptyStreamCallback;
+  }
+  override _transform(chunk: any, encoding: BufferEncoding, callback: TransformCallback): void {
+    this._receivedSomeData = true;
+    callback(null, chunk);
+  }
+  override _flush(callback: TransformCallback): void {
+    if (this._receivedSomeData)
+      callback(null);
+    else
+      this._onEmptyStreamCallback();
   }
 }
 
@@ -404,7 +683,12 @@ export class BrowserContextAPIRequestContext extends APIRequestContext {
     context.once(BrowserContext.Events.Close, () => this._disposeImpl());
   }
 
-  override dispose() {
+  override tracing() {
+    return this._context.tracing;
+  }
+
+  override async dispose(options: { reason?: string }) {
+    this._closeReason = options.reason;
     this.fetchResponses.clear();
   }
 
@@ -412,24 +696,25 @@ export class BrowserContextAPIRequestContext extends APIRequestContext {
     return {
       userAgent: this._context._options.userAgent || this._context._browser.userAgent(),
       extraHTTPHeaders: this._context._options.extraHTTPHeaders,
+      failOnStatusCode: undefined,
       httpCredentials: this._context._options.httpCredentials,
       proxy: this._context._options.proxy || this._context._browser.options.proxy,
-      timeoutSettings: this._context._timeoutSettings,
       ignoreHTTPSErrors: this._context._options.ignoreHTTPSErrors,
       baseURL: this._context._options.baseURL,
+      clientCertificates: this._context._options.clientCertificates,
     };
   }
 
-  async _addCookies(cookies: types.NetworkCookie[]): Promise<void> {
+  async addCookies(cookies: channels.NetworkCookie[]): Promise<void> {
     await this._context.addCookies(cookies);
   }
 
-  async _cookies(url: URL): Promise<types.NetworkCookie[]> {
-    return await this._context.cookies(url.toString());
+  async cookies(progress: Progress, url: URL): Promise<channels.NetworkCookie[]> {
+    return await this._context.cookies(progress, url.toString());
   }
 
-  override async storageState(): Promise<channels.APIRequestContextStorageStateResult> {
-    return this._context.storageState();
+  override async storageState(progress: Progress, indexedDB?: boolean): Promise<channels.APIRequestContextStorageStateResult> {
+    return this._context.storageState(progress, indexedDB);
   }
 }
 
@@ -438,36 +723,38 @@ export class GlobalAPIRequestContext extends APIRequestContext {
   private readonly _cookieStore: CookieStore = new CookieStore();
   private readonly _options: FetchRequestOptions;
   private readonly _origins: channels.OriginStorage[] | undefined;
+  private readonly _tracing: Tracing;
 
   constructor(playwright: Playwright, options: channels.PlaywrightNewRequestOptions) {
     super(playwright);
-    const timeoutSettings = new TimeoutSettings();
-    if (options.timeout !== undefined)
-      timeoutSettings.setDefaultTimeout(options.timeout);
-    const proxy = options.proxy;
-    if (proxy?.server) {
-      let url = proxy?.server.trim();
-      if (!/^\w+:\/\//.test(url))
-        url = 'http://' + url;
-      proxy.server = url;
-    }
+    this.attribution.context = this;
     if (options.storageState) {
-      this._origins = options.storageState.origins;
-      this._cookieStore.addCookies(options.storageState.cookies);
+      this._origins = options.storageState.origins?.map(origin => ({ indexedDB: [], ...origin }));
+      this._cookieStore.addCookies(options.storageState.cookies || []);
     }
+    verifyClientCertificates(options.clientCertificates);
     this._options = {
       baseURL: options.baseURL,
       userAgent: options.userAgent || getUserAgent(),
       extraHTTPHeaders: options.extraHTTPHeaders,
+      failOnStatusCode: !!options.failOnStatusCode,
       ignoreHTTPSErrors: !!options.ignoreHTTPSErrors,
+      maxRedirects: options.maxRedirects,
       httpCredentials: options.httpCredentials,
-      proxy,
-      timeoutSettings,
+      clientCertificates: options.clientCertificates,
+      proxy: options.proxy,
     };
-
+    this._tracing = new Tracing(this, options.tracesDir);
   }
 
-  override dispose() {
+  override tracing() {
+    return this._tracing;
+  }
+
+  override async dispose(options: { reason?: string }) {
+    this._closeReason = options.reason;
+    await this._tracing.flush();
+    await this._tracing.deleteTmpTracesDir();
     this._disposeImpl();
   }
 
@@ -475,18 +762,18 @@ export class GlobalAPIRequestContext extends APIRequestContext {
     return this._options;
   }
 
-  async _addCookies(cookies: types.NetworkCookie[]): Promise<void> {
+  async addCookies(cookies: channels.NetworkCookie[]): Promise<void> {
     this._cookieStore.addCookies(cookies);
   }
 
-  async _cookies(url: URL): Promise<types.NetworkCookie[]> {
+  async cookies(progress: Progress, url: URL): Promise<channels.NetworkCookie[]> {
     return this._cookieStore.cookies(url);
   }
 
-  override async storageState(): Promise<channels.APIRequestContextStorageStateResult> {
+  override async storageState(progress: Progress, indexedDB = false): Promise<channels.APIRequestContextStorageStateResult> {
     return {
       cookies: this._cookieStore.allCookies(),
-      origins: this._origins || []
+      origins: (this._origins || []).map(origin => ({ ...origin, indexedDB: indexedDB ? origin.indexedDB : [] })),
     };
   }
 }
@@ -500,92 +787,78 @@ function toHeadersArray(rawHeaders: string[]): types.HeadersArray {
 
 const redirectStatus = [301, 302, 303, 307, 308];
 
-function parseCookie(header: string): types.NetworkCookie | null {
-  const pairs = header.split(';').filter(s => s.trim().length > 0).map(p => p.split('=').map(s => s.trim()));
-  if (!pairs.length)
+function parseCookie(header: string): channels.NetworkCookie | null {
+  const raw = parseRawCookie(header);
+  if (!raw)
     return null;
-  const [name, value] = pairs[0];
-  const cookie: types.NetworkCookie = {
-    name,
-    value,
+  const cookie: channels.NetworkCookie = {
     domain: '',
     path: '',
     expires: -1,
     httpOnly: false,
     secure: false,
-    sameSite: 'Lax' // None for non-chromium
+    // From https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie/SameSite
+    // The cookie-sending behavior if SameSite is not specified is SameSite=Lax.
+    sameSite: 'Lax',
+    ...raw
   };
-  for (let i = 1; i < pairs.length; i++) {
-    const [name, value] = pairs[i];
-    switch (name.toLowerCase()) {
-      case 'expires':
-        const expiresMs = (+new Date(value));
-        if (isFinite(expiresMs))
-          cookie.expires = expiresMs / 1000;
-        break;
-      case 'max-age':
-        const maxAgeSec = parseInt(value, 10);
-        if (isFinite(maxAgeSec))
-          cookie.expires = Date.now() / 1000 + maxAgeSec;
-        break;
-      case 'domain':
-        cookie.domain = value.toLocaleLowerCase() || '';
-        if (cookie.domain && !cookie.domain.startsWith('.'))
-          cookie.domain = '.' + cookie.domain;
-        break;
-      case 'path':
-        cookie.path = value || '';
-        break;
-      case 'secure':
-        cookie.secure = true;
-        break;
-      case 'httponly':
-        cookie.httpOnly = true;
-        break;
-    }
-  }
   return cookie;
 }
 
-function isJsonParsable(value: any) {
-  if (typeof value !== 'string')
-    return false;
-  try {
-    JSON.parse(value);
-    return true;
-  } catch (e) {
-    if (e instanceof SyntaxError)
-      return false;
-    else
-      throw e;
-  }
-}
-
-function serializePostData(params: channels.APIRequestContextFetchParams, headers: { [name: string]: string }): Buffer | undefined {
+function serializePostData(params: channels.APIRequestContextFetchParams, headers: HeadersObject): Buffer | undefined {
   assert((params.postData ? 1 : 0) + (params.jsonData ? 1 : 0) + (params.formData ? 1 : 0) + (params.multipartData ? 1 : 0) <= 1, `Only one of 'data', 'form' or 'multipart' can be specified`);
-  if (params.jsonData) {
-    const json = isJsonParsable(params.jsonData) ? params.jsonData : JSON.stringify(params.jsonData);
-    headers['content-type'] ??= 'application/json';
-    return Buffer.from(json, 'utf8');
+  if (params.jsonData !== undefined) {
+    setHeader(headers, 'content-type', 'application/json', true);
+    return Buffer.from(params.jsonData, 'utf8');
   } else if (params.formData) {
     const searchParams = new URLSearchParams();
     for (const { name, value } of params.formData)
       searchParams.append(name, value);
-    headers['content-type'] ??= 'application/x-www-form-urlencoded';
+    setHeader(headers, 'content-type', 'application/x-www-form-urlencoded', true);
     return Buffer.from(searchParams.toString(), 'utf8');
   } else if (params.multipartData) {
     const formData = new MultipartFormData();
     for (const field of params.multipartData) {
       if (field.file)
         formData.addFileField(field.name, field.file);
-      else if (field.value)
+      else if (field.value !== undefined)
         formData.addField(field.name, field.value);
     }
-    headers['content-type'] ??= formData.contentTypeHeader();
+    setHeader(headers, 'content-type', formData.contentTypeHeader(), true);
     return formData.finish();
-  } else if (params.postData) {
-    headers['content-type'] ??= 'application/octet-stream';
-    return Buffer.from(params.postData, 'base64');
+  } else if (params.postData !== undefined) {
+    setHeader(headers, 'content-type', 'application/octet-stream', true);
+    return params.postData;
   }
   return undefined;
+}
+
+function setHeader(headers: { [name: string]: string }, name: string, value: string, keepExisting = false) {
+  const existing = Object.entries(headers).find(pair => pair[0].toLowerCase() === name.toLowerCase());
+  if (!existing)
+    headers[name] = value;
+  else if (!keepExisting)
+    headers[existing[0]] = value;
+}
+
+function getHeader(headers: HeadersObject, name: string) {
+  const existing = Object.entries(headers).find(pair => pair[0].toLowerCase() === name.toLowerCase());
+  return existing ? existing[1] : undefined;
+}
+
+function removeHeader(headers: { [name: string]: string }, name: string) {
+  const existing = Object.entries(headers).find(pair => pair[0].toLowerCase() === name.toLowerCase());
+  if (existing)
+    delete headers[existing[0]];
+}
+
+function isNetworkConnectionError(e: any): boolean {
+  const code = e?.code;
+  return code === 'ECONNRESET' || code === 'EPIPE' || code === 'ECONNABORTED';
+}
+
+function setBasicAuthorizationHeader(headers: { [name: string]: string }, credentials: HttpCredentials) {
+  const { username, password } = credentials;
+  const encoded = Buffer.from(`${username || ''}:${password || ''}`).toString('base64');
+  setHeader(headers, 'authorization', `Basic ${encoded}`);
 }

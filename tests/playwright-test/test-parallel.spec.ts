@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-import { test, expect } from './playwright-test-fixtures';
+import { test, expect, countTimes } from './playwright-test-fixtures';
 
 test('test.describe.parallel should throw inside test.describe.serial', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'a.test.ts': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       test.describe.serial('serial suite', () => {
         test.describe.parallel('parallel suite', () => {
         });
@@ -27,13 +27,14 @@ test('test.describe.parallel should throw inside test.describe.serial', async ({
     `,
   });
   expect(result.exitCode).toBe(1);
-  expect(result.output).toContain('a.test.ts:7:23: describe.parallel cannot be nested inside describe.serial');
+  expect(result.output).toContain('Error: describe.parallel cannot be nested inside describe.serial');
+  expect(result.output).toContain('a.test.ts:4');
 });
 
 test('test.describe.parallel should work', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'a.test.ts': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       test.describe.parallel('parallel suite', () => {
         test('test1', async ({}, testInfo) => {
           console.log('\\n%% worker=' + testInfo.workerIndex);
@@ -57,4 +58,217 @@ test('test.describe.parallel should work', async ({ runInlineTest }) => {
   expect(result.output).toContain('%% worker=0');
   expect(result.output).toContain('%% worker=1');
   expect(result.output).toContain('%% worker=2');
+});
+
+test('test.describe.parallel should work in file', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test.describe.configure({ mode: 'parallel' });
+      test('test1', async ({}, testInfo) => {
+        console.log('\\n%% worker=' + testInfo.workerIndex);
+        await new Promise(f => setTimeout(f, 1000));
+      });
+      test('test2', async ({}, testInfo) => {
+        console.log('\\n%% worker=' + testInfo.workerIndex);
+        await new Promise(f => setTimeout(f, 1000));
+      });
+      test.describe('inner suite', () => {
+        test('test3', async ({}, testInfo) => {
+          console.log('\\n%% worker=' + testInfo.workerIndex);
+          await new Promise(f => setTimeout(f, 1000));
+        });
+      });
+    `,
+  }, { workers: 3 });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(3);
+  expect(result.output).toContain('%% worker=0');
+  expect(result.output).toContain('%% worker=1');
+  expect(result.output).toContain('%% worker=2');
+});
+
+test('test.describe.parallel should work in describe', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test.describe('parallel suite', () => {
+        test.describe.configure({ mode: 'parallel' });
+        test('test1', async ({}, testInfo) => {
+          console.log('\\n%% worker=' + testInfo.workerIndex);
+          await new Promise(f => setTimeout(f, 1000));
+        });
+        test('test2', async ({}, testInfo) => {
+          console.log('\\n%% worker=' + testInfo.workerIndex);
+          await new Promise(f => setTimeout(f, 1000));
+        });
+        test.describe('inner suite', () => {
+          test('test3', async ({}, testInfo) => {
+            console.log('\\n%% worker=' + testInfo.workerIndex);
+            await new Promise(f => setTimeout(f, 1000));
+          });
+        });
+      });
+    `,
+  }, { workers: 3 });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(3);
+  expect(result.output).toContain('%% worker=0');
+  expect(result.output).toContain('%% worker=1');
+  expect(result.output).toContain('%% worker=2');
+});
+
+test('config.fullyParallel should work', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      module.exports = { fullyParallel: true };
+    `,
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test('test1', async ({}, testInfo) => {
+        console.log('\\n%% worker=' + testInfo.workerIndex);
+        await new Promise(f => setTimeout(f, 1000));
+      });
+      test('test2', async ({}, testInfo) => {
+        console.log('\\n%% worker=' + testInfo.workerIndex);
+        await new Promise(f => setTimeout(f, 1000));
+      });
+      test.describe('inner suite', () => {
+        test('test3', async ({}, testInfo) => {
+          console.log('\\n%% worker=' + testInfo.workerIndex);
+          await new Promise(f => setTimeout(f, 1000));
+        });
+      });
+    `,
+  }, { workers: 3 });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(3);
+  expect(result.output).toContain('%% worker=0');
+  expect(result.output).toContain('%% worker=1');
+  expect(result.output).toContain('%% worker=2');
+});
+
+test('project.fullyParallel should work', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      module.exports = { projects: [ { fullyParallel: true } ] };
+    `,
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test('test1', async ({}, testInfo) => {
+        console.log('\\n%% worker=' + testInfo.workerIndex);
+        await new Promise(f => setTimeout(f, 1000));
+      });
+      test('test2', async ({}, testInfo) => {
+        console.log('\\n%% worker=' + testInfo.workerIndex);
+        await new Promise(f => setTimeout(f, 1000));
+      });
+      test.describe('inner suite', () => {
+        test('test3', async ({}, testInfo) => {
+          console.log('\\n%% worker=' + testInfo.workerIndex);
+          await new Promise(f => setTimeout(f, 1000));
+        });
+      });
+    `,
+  }, { workers: 3 });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(3);
+  expect(result.output).toContain('%% worker=0');
+  expect(result.output).toContain('%% worker=1');
+  expect(result.output).toContain('%% worker=2');
+});
+
+test('parallel mode should minimize running beforeAll/afterAll hooks', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test.describe.configure({ mode: 'parallel' });
+      test.beforeAll(() => {
+        console.log('\\n%%beforeAll');
+      });
+      test.afterAll(() => {
+        console.log('\\n%%afterAll');
+      });
+      test('test1', () => {});
+      test('test2', () => {});
+      test('test3', () => {});
+      test('test4', () => {});
+    `,
+  }, { workers: 1 });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(4);
+  expect(countTimes(result.output, '%%beforeAll')).toBe(1);
+  expect(countTimes(result.output, '%%afterAll')).toBe(1);
+});
+
+test('parallel mode should minimize running beforeAll/afterAll hooks 2', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test.describe.configure({ mode: 'parallel' });
+      test.beforeAll(() => {
+        console.log('\\n%%beforeAll');
+      });
+      test.afterAll(() => {
+        console.log('\\n%%afterAll');
+      });
+      test('test1', () => {});
+      test('test2', () => {});
+      test('test3', () => {});
+      test('test4', () => {});
+    `,
+  }, { workers: 2 });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(4);
+  expect(countTimes(result.output, '%%beforeAll')).toBe(2);
+  expect(countTimes(result.output, '%%afterAll')).toBe(2);
+});
+
+test('parallel mode should display worker count taking project workers into account', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      export default {
+        workers: 10,
+        fullyParallel: true,
+        projects: [
+          { name: 'project1', workers: 3 },
+        ],
+      };
+    `,
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test('test1', () => {});
+      test('test2', () => {});
+      test('test3', () => {});
+      test('test4', () => {});
+    `,
+  }, { workers: 10 });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(4);
+  expect(result.output).toContain('Running 4 tests using 3 workers');
+
+  // Multiple parallel projects
+  const result2 = await runInlineTest({
+    'playwright.config.ts': `
+      export default {
+        workers: 12,
+        fullyParallel: true,
+        projects: [
+          { name: 'project1', workers: 3 },
+          { name: 'project2', workers: 4 },
+          { name: 'project3', workers: 4 },
+        ],
+      };
+    `,
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test('test1', () => {});
+      test('test2', () => {});
+      test('test3', () => {});
+      test('test4', () => {});
+    `,
+  }, { workers: 12 });
+  expect(result2.exitCode).toBe(0);
+  expect(result2.passed).toBe(12);
+  expect(result2.output).toContain('Running 12 tests using 11 workers');
 });

@@ -14,31 +14,34 @@
  * limitations under the License.
  */
 
-import * as channels from '../protocol/channels';
-import * as fs from 'fs';
-import { Stream } from './stream';
-import { mkdirIfNeeded } from '../utils/utils';
+import fs from 'fs';
+
 import { ChannelOwner } from './channelOwner';
-import { Readable } from 'stream';
+import { Stream } from './stream';
+import { mkdirIfNeeded } from './fileUtils';
+import { kNoTimeout } from './timeoutSettings';
+
+import type * as channels from './channels';
+import type { Readable } from 'stream';
 
 export class Artifact extends ChannelOwner<channels.ArtifactChannel> {
   static from(channel: channels.ArtifactChannel): Artifact {
     return (channel as any)._object;
   }
 
-  async pathAfterFinished(): Promise<string | null> {
+  async pathAfterFinished(): Promise<string> {
     if (this._connection.isRemote())
       throw new Error(`Path is not available when connecting remotely. Use saveAs() to save a local copy.`);
-    return (await this._channel.pathAfterFinished()).value || null;
+    return (await this._channel.pathAfterFinished({}, kNoTimeout)).value;
   }
 
   async saveAs(path: string): Promise<void> {
     if (!this._connection.isRemote()) {
-      await this._channel.saveAs({ path });
+      await this._channel.saveAs({ path }, kNoTimeout);
       return;
     }
 
-    const result = await this._channel.saveAsStream();
+    const result = await this._channel.saveAsStream({}, kNoTimeout);
     const stream = Stream.from(result.stream);
     await mkdirIfNeeded(path);
     await new Promise((resolve, reject) => {
@@ -49,22 +52,34 @@ export class Artifact extends ChannelOwner<channels.ArtifactChannel> {
   }
 
   async failure(): Promise<string | null> {
-    return (await this._channel.failure()).error || null;
+    return (await this._channel.failure({}, kNoTimeout)).error || null;
   }
 
-  async createReadStream(): Promise<Readable | null> {
-    const result = await this._channel.stream();
-    if (!result.stream)
-      return null;
+  async createReadStream(): Promise<Readable> {
+    const result = await this._channel.stream({}, kNoTimeout);
     const stream = Stream.from(result.stream);
     return stream.stream();
   }
 
+  async readIntoBuffer(): Promise<Buffer> {
+    const stream = (await this.createReadStream())!;
+    return await new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      stream.on('data', (chunk: Buffer) => {
+        chunks.push(chunk);
+      });
+      stream.on('end', () => {
+        resolve(Buffer.concat(chunks));
+      });
+      stream.on('error', reject);
+    });
+  }
+
   async cancel(): Promise<void> {
-    return this._channel.cancel();
+    return await this._channel.cancel({}, kNoTimeout);
   }
 
   async delete(): Promise<void> {
-    return this._channel.delete();
+    return await this._channel.delete({}, kNoTimeout);
   }
 }

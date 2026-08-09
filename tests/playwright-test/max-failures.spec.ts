@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-import { test, expect, stripAscii } from './playwright-test-fixtures';
+import { test, expect } from './playwright-test-fixtures';
 
 test('max-failures should work', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'a.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       for (let i = 0; i < 10; ++i) {
         test('fail_' + i, () => {
           expect(true).toBe(false);
@@ -27,7 +27,7 @@ test('max-failures should work', async ({ runInlineTest }) => {
       }
     `,
     'b.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       for (let i = 0; i < 10; ++i) {
         test('fail_' + i, () => {
           expect(true).toBe(false);
@@ -38,14 +38,12 @@ test('max-failures should work', async ({ runInlineTest }) => {
   expect(result.exitCode).toBe(1);
   expect(result.failed).toBe(8);
   expect(result.output.split('\n').filter(l => l.includes('expect(')).length).toBe(16);
-  expect(result.report.suites[0].specs.map(spec => spec.tests[0].results.length)).toEqual(new Array(10).fill(1));
-  expect(result.report.suites[1].specs.map(spec => spec.tests[0].results.length)).toEqual(new Array(10).fill(1));
 });
 
 test('-x should work', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'a.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       for (let i = 0; i < 10; ++i) {
         test('fail_' + i, () => {
           expect(true).toBe(false);
@@ -53,7 +51,7 @@ test('-x should work', async ({ runInlineTest }) => {
       }
     `,
     'b.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       for (let i = 0; i < 10; ++i) {
         test('fail_' + i, () => {
           expect(true).toBe(false);
@@ -69,7 +67,7 @@ test('-x should work', async ({ runInlineTest }) => {
 test('max-failures should work with retries', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'a.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       for (let i = 0; i < 10; ++i) {
         test('fail_' + i, () => {
           expect(true).toBe(false);
@@ -78,14 +76,14 @@ test('max-failures should work with retries', async ({ runInlineTest }) => {
     `,
   }, { 'max-failures': 2, 'retries': 4 });
   expect(result.exitCode).toBe(1);
-  expect(result.failed).toBe(1);
-  expect(result.output.split('\n').filter(l => l.includes('Received:')).length).toBe(2);
+  expect(result.failed).toBe(2);
+  expect(result.output.split('\n').filter(l => l.includes('Received:')).length).toBe(2 * (4 + 1)); // 2 tests * (4 retries + 1 original)
 });
 
 test('max-failures should stop workers', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'a.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       test('passed', async () => {
         await new Promise(f => setTimeout(f, 2000));
       });
@@ -94,11 +92,11 @@ test('max-failures should stop workers', async ({ runInlineTest }) => {
       });
     `,
     'b.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       test('passed short', async () => {
         await new Promise(f => setTimeout(f, 1));
       });
-      test('interrupted counts as skipped', async () => {
+      test('interrupted reported as interrupted', async () => {
         console.log('\\n%%interrupted');
         await new Promise(f => setTimeout(f, 5000));
       });
@@ -110,7 +108,8 @@ test('max-failures should stop workers', async ({ runInlineTest }) => {
   expect(result.exitCode).toBe(1);
   expect(result.passed).toBe(2);
   expect(result.failed).toBe(1);
-  expect(result.skipped).toBe(2);
+  expect(result.interrupted).toBe(1);
+  expect(result.didNotRun).toBe(1);
   expect(result.output).toContain('%%interrupted');
   expect(result.output).not.toContain('%%skipped');
 });
@@ -125,7 +124,7 @@ test('max-failures should properly shutdown', async ({ runInlineTest }) => {
       export default config;
     `,
     'test1.spec.ts': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       test.describe('spec 1', () => {
         test('test 1', async () => {
           expect(false).toBeTruthy()
@@ -133,7 +132,7 @@ test('max-failures should properly shutdown', async ({ runInlineTest }) => {
       });
     `,
     'test2.spec.ts': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       test.describe('spec 2', () => {
         test('test 2', () => {
           expect(true).toBeTruthy()
@@ -143,5 +142,120 @@ test('max-failures should properly shutdown', async ({ runInlineTest }) => {
   }, { workers: 1 });
   expect(result.exitCode).toBe(1);
   expect(result.failed).toBe(1);
-  expect(stripAscii(result.output)).toContain('expect(false).toBeTruthy()');
+  expect(result.output).toContain('expect(false).toBeTruthy()');
+});
+
+test('max-failures should work across phases', async ({ runInlineTest }) => {
+  test.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/26344' });
+
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      const config = {
+        testDir: './',
+        maxFailures: 1,
+        projects: [
+          { name: 'a', testMatch: ['example.spec.ts'] },
+          { name: 'b', testMatch: ['example.spec.ts'], dependencies: ['a'] },
+          { name: 'c', testMatch: ['example.spec.ts'], dependencies: ['a'] },
+          { name: 'd', testMatch: ['example.spec.ts'], dependencies: ['b'] },
+        ]
+      };
+      export default config;
+    `,
+    'example.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      test('test', () => {
+        const project = test.info().project.name;
+        console.log('running ' + project);
+        if (project === 'c')
+          throw new Error('failed!');
+      });
+    `,
+  }, { workers: 1 });
+  expect(result.exitCode).toBe(1);
+  expect(result.failed).toBe(1);
+  expect(result.passed).toBe(2);
+  expect(result.didNotRun).toBe(1);
+  expect(result.output).toContain('running a');
+  expect(result.output).toContain('running b');
+  expect(result.output).toContain('running c');
+  expect(result.output).not.toContain('running d');
+});
+
+test('max-failures should still run teardown project', async ({ runInlineTest }) => {
+  test.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/41713' });
+
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      module.exports = {
+        maxFailures: 1,
+        projects: [
+          { name: 'setup', testMatch: '**/setup.ts', teardown: 'teardown' },
+          { name: 'teardown', testMatch: '**/teardown.ts' },
+          { name: 'a', dependencies: ['setup'], testMatch: '**/a.spec.ts' },
+          // Unrelated chain that becomes ready to run together with 'teardown'.
+          { name: 'x', testMatch: '**/x.spec.ts' },
+          { name: 'y', dependencies: ['x'], testMatch: '**/y.spec.ts' },
+          { name: 'z', dependencies: ['y'], testMatch: '**/z.spec.ts' },
+        ],
+      };`,
+    'setup.ts': `
+      import { test } from '@playwright/test';
+      test('setup', async ({}) => { console.log('\\n%%setup'); });
+    `,
+    'teardown.ts': `
+      import { test } from '@playwright/test';
+      test('teardown', async ({}) => { console.log('\\n%%teardown'); });
+    `,
+    'a.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      test('failing', async ({}) => { expect(1).toBe(2); });
+    `,
+    'x.spec.ts': `
+      import { test } from '@playwright/test';
+      test('x', async ({}) => {});
+    `,
+    'y.spec.ts': `
+      import { test } from '@playwright/test';
+      test('y', async ({}) => {});
+    `,
+    'z.spec.ts': `
+      import { test } from '@playwright/test';
+      test('z', async ({}) => { console.log('\\n%%z'); });
+    `,
+  }, { workers: 1 });
+  expect(result.exitCode).toBe(1);
+  expect(result.failed).toBe(1);
+  expect(result.output).toContain('%%setup');
+  expect(result.output).toContain('%%teardown');
+  // Regular project 'z' must not run after maxFailures.
+  expect(result.output).not.toContain('%%z');
+});
+
+test('max-failures should not consider retries as failures', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      export default {
+        maxFailures: 5,
+        retries: 5,
+      };
+    `,
+    'example.spec.ts': `
+      import { test, expect } from '@playwright/test';
+
+      test('I fail 9 times 1', () => {
+        if (test.info().retry < 4)
+          throw new Error('failing intentionally');
+      });
+
+      test('I fail 9 times 2', () => {
+        if (test.info().retry < 4)
+          throw new Error('failing intentionally');
+      });
+    `,
+  }, { workers: 1 });
+  expect(result.exitCode).toBe(0);
+  expect(result.failed).toBe(0);
+  expect(result.flaky).toBe(2);
+  expect(result.passed).toBe(0);
 });

@@ -1,14 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 set +x
 
 if [[ ($1 == '--help') || ($1 == '-h') || ($1 == '') || ($2 == '') ]]; then
-  echo "usage: $(basename $0) {--arm64,--amd64} {bionic,focal} playwright:localbuild-focal"
+  echo "usage: $(basename $0) {--arm64,--amd64} {jammy,noble,resolute} playwright:localbuild-noble"
   echo
-  echo "Build Playwright docker image and tag it as 'playwright:localbuild-focal'."
+  echo "Build Playwright docker image and tag it as 'playwright:localbuild-noble'."
   echo "Once image is built, you can run it with"
   echo ""
-  echo "  docker run --rm -it playwright:localbuild-focal /bin/bash"
+  echo "  docker run --rm -it playwright:localbuild-noble /bin/bash"
   echo ""
   echo "NOTE: this requires on Playwright dependencies to be installed with 'npm install'"
   echo "      and Playwright itself being built with 'npm run build'"
@@ -37,4 +37,16 @@ else
   exit 1
 fi
 
-docker build --platform "${PLATFORM}" -t "$3" -f "Dockerfile.$2" .
+SECRET_ARGS=()
+if [[ -n "${NPMRC_SECRET:-}" ]]; then
+  SECRET_ARGS+=(--secret "id=npmrc,src=${NPMRC_SECRET}")
+fi
+
+# Keep each arch image a plain single-platform manifest without the unknown/unknown platform entry.
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+
+docker build --platform "${PLATFORM}" \
+  --build-arg ACR_CACHE_PREFIX="${ACR_CACHE_PREFIX}" \
+  --build-arg UBUNTU_MIRROR_PREFIX="${UBUNTU_MIRROR_PREFIX}" \
+  "${SECRET_ARGS[@]}" \
+  -t "$3" -f "Dockerfile.$2" .

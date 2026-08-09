@@ -15,11 +15,16 @@
  * limitations under the License.
  */
 
-import { EventEmitter } from 'events';
-import * as types from './types';
-import { Progress } from './progress';
-import { debugLogger } from '../utils/debugLogger';
-import { eventsHelper, RegisteredListener } from '../utils/eventsHelper';
+import { debugLogger } from '@utils/debugLogger';
+import { eventsHelper } from '@utils/eventsHelper';
+
+import type { Progress } from './progress';
+import type * as types from './types';
+import type { RegisteredListener } from '@utils/eventsHelper';
+import type { EventEmitter } from 'events';
+
+
+const MAX_LOG_LENGTH = process.env.MAX_LOG_LENGTH ? +process.env.MAX_LOG_LENGTH : Infinity;
 
 class Helper {
   static completeUserURL(urlString: string): string {
@@ -50,24 +55,20 @@ class Helper {
     return null;
   }
 
-  static waitForEvent(progress: Progress | null, emitter: EventEmitter, event: string | symbol, predicate?: Function): { promise: Promise<any>, dispose: () => void } {
+  static waitForEvent(progress: Progress, emitter: EventEmitter, event: string | symbol, predicate?: Function): { promise: Promise<any>, dispose: () => void } {
     const listeners: RegisteredListener[] = [];
-    const promise = new Promise((resolve, reject) => {
+    const dispose = () => eventsHelper.removeEventListeners(listeners);
+    const promise = progress.race(new Promise((resolve, reject) => {
       listeners.push(eventsHelper.addEventListener(emitter, event, eventArg => {
         try {
           if (predicate && !predicate(eventArg))
             return;
-          eventsHelper.removeEventListeners(listeners);
           resolve(eventArg);
         } catch (e) {
-          eventsHelper.removeEventListeners(listeners);
           reject(e);
         }
       }));
-    });
-    const dispose = () => eventsHelper.removeEventListeners(listeners);
-    if (progress)
-      progress.cleanupWhenAborted(dispose);
+    })).finally(() => dispose());
     return { promise, dispose };
   }
 
@@ -83,15 +84,19 @@ class Helper {
     return (direction: 'send' | 'receive', message: object) => {
       if (protocolLogger)
         protocolLogger(direction, message);
-      if (debugLogger.isEnabled('protocol'))
-        debugLogger.log('protocol', (direction === 'send' ? 'SEND ► ' : '◀ RECV ') + JSON.stringify(message));
+      if (debugLogger.isEnabled('protocol')) {
+        let text = JSON.stringify(message);
+        if (text.length > MAX_LOG_LENGTH)
+          text = text.substring(0, MAX_LOG_LENGTH / 2) + ' <<<<<( LOG TRUNCATED )>>>>> ' + text.substring(text.length - MAX_LOG_LENGTH / 2);
+        debugLogger.log('protocol', (direction === 'send' ? 'SEND ► ' : '◀ RECV ') + text);
+      }
     };
   }
 
-  static formatBrowserLogs(logs: string[]) {
-    if (!logs.length)
+  static formatBrowserLogs(logs: string[], disconnectReason?: string) {
+    if (!disconnectReason && !logs.length)
       return '';
-    return '\n' + '='.repeat(20) + ' Browser output: ' + '='.repeat(20) + '\n' + logs.join('\n');
+    return '\n' + (disconnectReason ? disconnectReason + '\n' : '') + logs.join('\n');
   }
 }
 

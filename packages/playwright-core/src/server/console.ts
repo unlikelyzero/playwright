@@ -14,22 +14,35 @@
  * limitations under the License.
  */
 
-import { SdkObject } from './instrumentation';
-import * as js from './javascript';
-import { ConsoleMessageLocation } from './types';
+import type * as js from './javascript';
+import type { Page, Worker } from './page';
+import type { ConsoleMessageLocation } from './types';
 
-export class ConsoleMessage extends SdkObject {
+export class ConsoleMessage {
   private _type: string;
   private _text?: string;
   private _args: js.JSHandle[];
   private _location: ConsoleMessageLocation;
+  private _page: Page | null;
+  private _worker: Worker | null;
+  private _timestamp: number;
 
-  constructor(parent: SdkObject, type: string, text: string | undefined, args: js.JSHandle[], location?: ConsoleMessageLocation) {
-    super(parent, 'console-message');
+  constructor(page: Page | null, worker: Worker | null, type: string, text: string | undefined, args: js.JSHandle[], location: ConsoleMessageLocation, timestamp: number) {
+    this._page = page;
+    this._worker = worker;
     this._type = type;
     this._text = text;
     this._args = args;
     this._location = location || { url: '', lineNumber: 0, columnNumber: 0 };
+    this._timestamp = timestamp;
+  }
+
+  page() {
+    return this._page;
+  }
+
+  worker() {
+    return this._worker;
   }
 
   type(): string {
@@ -48,5 +61,9 @@ export class ConsoleMessage extends SdkObject {
 
   location(): ConsoleMessageLocation {
     return this._location;
+  }
+
+  timestamp(): number {
+    return this._timestamp;
   }
 }

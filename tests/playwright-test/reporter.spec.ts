@@ -14,529 +14,996 @@
  * limitations under the License.
  */
 
+import type { Reporter, TestCase, TestResult, TestStep } from '../../packages/playwright-test/reporter';
 import { test, expect } from './playwright-test-fixtures';
 
 const smallReporterJS = `
+const path = require('path');
+
+function formatLocation(location) {
+  if (!location)
+    return ' @ <no location>';
+  return ' @ ' + path.basename(location.file) + ':' + location.line;
+}
+
+function formatTitle(test) {
+  let titlePath = test.titlePath();
+  if (!titlePath[0])
+    [, ...titlePath] = titlePath;
+  return titlePath.join(' > ');
+}
+
+const asciiRegex = new RegExp('[\\\\u001B\\\\u009B][[\\\\]()#;?]*(?:(?:(?:[a-zA-Z\\\\d]*(?:;[-a-zA-Z\\\\d\\\\/#&.:=?%@~_]*)*)?\\\\u0007)|(?:(?:\\\\d{1,4}(?:;\\\\d{0,4})*)?[\\\\dA-PR-TZcf-ntqry=><~]))', 'g');
+function stripAnsi(str) {
+  return str.replace(asciiRegex, '');
+}
+
 class Reporter {
+  constructor(options) {
+    this.options = options;
+  }
+
+  trimError(message) {
+    if (this.options.skipErrorMessage)
+      return '<error message>';
+    const lines = message.split('\\n');
+    return lines[0].trimEnd();
+  }
+
+  printErrors(errors, prefix) {
+    for (const error of errors) {
+      const errorLocation = this.options.skipErrorLocation ? '' : formatLocation(error.location);
+      console.log((prefix || '  error: ') + this.trimError(error.message) + errorLocation);
+      if (this.options.printErrorSnippet && error.snippet) {
+        const lines = ['======', ...error.snippet.split('\\n'), '======'];
+        console.log(lines.map(line => stripAnsi('  ' + line).trimEnd()).join('\\n'));
+      }
+    }
+  }
+
+  printsToStdio() {
+    return true;
+  }
+
   onBegin(config, suite) {
-    console.log('\\n%%begin');
+    console.log(); // for nicer expectations
+    console.log('onBegin: ' + suite.allTests().length + ' tests total');
+    if (this.options.onBegin)
+      console.log('  options.onBegin=' + this.options.onBegin);
   }
-  onTestBegin(test) {}
-  onStdOut() {}
-  onStdErr() {}
-  onTestEnd(test, result) {}
-  onTimeout() {}
-  onError(error) {
-    console.log('\\n%%got error: ' + error.message);
-  }
-  onEnd() {
-    console.log('\\n%%end');
-  }
-}
-module.exports = Reporter;
-`;
 
-const stepsReporterJS = `
-class Reporter {
-  onStdOut(chunk) {
-    process.stdout.write(chunk);
+  onTestBegin(test, result) {
+    console.log('onTestBegin: ' + formatTitle(test) + '; retry #' + result.retry);
   }
-  distillStep(step) {
-    return {
-      ...step,
-      startTime: undefined,
-      duration: undefined,
-      parent: undefined,
-      data: undefined,
-      location: undefined,
-      steps: step.steps.length ? step.steps.map(s => this.distillStep(s)) : undefined,
-    };
+
+  onTestEnd(test, result) {
+    const status = this.options.printTestStatus ? '[' + result.status + '] ' : '';
+    console.log('onTestEnd: ' + status + formatTitle(test) + '; retry #' + result.retry);
+    this.printErrors(result.errors);
   }
+
   onStepBegin(test, result, step) {
-    console.log('%%%% begin', JSON.stringify(this.distillStep(step)));
   }
+
   onStepEnd(test, result, step) {
-    if (step.error?.stack)
-      step.error.stack = '<stack>';
-    if (step.error?.message.includes('getaddrinfo'))
-      step.error.message = '<message>';
-    console.log('%%%% end', JSON.stringify(this.distillStep(step)));
+    if (this.options.printSteps) {
+      console.log('onStepEnd: [' + step.category + '] ' + step.title);
+      if (step.error)
+        this.printErrors([step.error]);
+    }
+  }
+
+  // For easier debugging.
+  onStdOut(data) {
+    process.stdout.write(data.toString());
+  }
+
+  // For easier debugging.
+  onStdErr(data) {
+    process.stderr.write(data.toString());
+  }
+
+  onError(error) {
+    this.printErrors([error], 'onError: ');
+  }
+
+  async onEnd() {
+    await new Promise(f => setTimeout(f, 500));
+    console.log('onEnd');
+    if (this.options.onEnd)
+      console.log('  options.onEnd=' + this.options.onEnd);
+  }
+
+  async onExit() {
+    console.log('onExit');
   }
 }
 module.exports = Reporter;
 `;
 
-test('should work with custom reporter', async ({ runInlineTest }) => {
+for (const useIntermediateMergeReport of [false, true] as const) {
+  test.describe(`${useIntermediateMergeReport ? 'merged' : 'created'}`, () => {
+    test.use({ useIntermediateMergeReport });
+
+    test('should work with custom reporter', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: [
+              [ './reporter.ts', { onBegin: 'begin-data', onEnd: 'end-data' } ]
+            ],
+            projects: [
+              { name: 'foo', repeatEach: 2 },
+              { name: 'bar' },
+            ],
+          };
+        `,
+        'a.test.ts': `
+          import { test, expect } from '@playwright/test';
+          test('not run', async ({}) => {
+          });
+          test.only('is run', async ({}) => {
+          });
+        `
+      }, { reporter: '', workers: 1 });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe(`
+onBegin: 3 tests total
+  options.onBegin=begin-data
+onTestBegin: foo > a.test.ts > is run; retry #0
+onTestEnd: foo > a.test.ts > is run; retry #0
+onTestBegin: foo > a.test.ts > is run; retry #0
+onTestEnd: foo > a.test.ts > is run; retry #0
+onTestBegin: bar > a.test.ts > is run; retry #0
+onTestEnd: bar > a.test.ts > is run; retry #0
+onEnd
+  options.onEnd=end-data
+onExit
+`);
+    });
+
+    test('should work without a file extension', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: './reporter',
+          };
+        `,
+        'a.test.ts': `
+          import { test, expect } from '@playwright/test';
+          test('pass', async ({}) => {
+          });
+        `
+      }, { reporter: '', workers: 1 });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe(`
+onBegin: 1 tests total
+onTestBegin:  > a.test.ts > pass; retry #0
+onTestEnd:  > a.test.ts > pass; retry #0
+onEnd
+onExit
+`);
+    });
+
+    test('should report onEnd after global teardown', async ({ runInlineTest }) => {
+      test.skip(useIntermediateMergeReport);
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'globalSetup.ts': `
+          module.exports = () => {
+            return () => console.log('\\n%%global teardown');
+          };
+        `,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: './reporter',
+            globalSetup: './globalSetup',
+          };
+        `,
+        'a.test.ts': `
+          import { test, expect } from '@playwright/test';
+          test('pass', async ({}) => {
+          });
+        `
+      }, { reporter: '', workers: 1 });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe(`
+onBegin: 1 tests total
+onTestBegin:  > a.test.ts > pass; retry #0
+onTestEnd:  > a.test.ts > pass; retry #0
+
+%%global teardown
+onEnd
+onExit
+`);
+    });
+
+    test('should load reporter from node_modules', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'node_modules/my-reporter/index.js': smallReporterJS,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: 'my-reporter',
+          };
+        `,
+        'a.test.ts': `
+          import { test, expect } from '@playwright/test';
+          test('pass', async ({}) => {
+          });
+        `
+      }, { reporter: '', workers: 1 });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe(`
+onBegin: 1 tests total
+onTestBegin:  > a.test.ts > pass; retry #0
+onTestEnd:  > a.test.ts > pass; retry #0
+onEnd
+onExit
+`);
+    });
+
+    test('should not have internal error when steps are finished after timeout', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'a.test.ts': `
+          import { test as base, expect } from '@playwright/test';
+          const test = base.extend({
+            page: async ({ page }, use) => {
+              await use(page);
+              // Timeout in fixture teardown that will resolve on browser.close.
+              await page.waitForNavigation();
+            },
+          });
+          test('pass', async ({ page }) => {
+            // Timeout in the test.
+            await page.click('foo');
+          });
+        `
+      }, { workers: 1, timeout: 1000, reporter: 'dot', retries: 1 });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.failed).toBe(1);
+      expect(result.output).not.toContain('Internal error');
+    });
+
+    test('should report forbid-only error to reporter', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: './reporter',
+          };
+        `,
+        'a.test.ts': `
+          import { test, expect } from '@playwright/test';
+          test.only('pass', () => {});
+        `
+      }, { 'reporter': '', 'forbid-only': true });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toBe(`
+onBegin: 0 tests total
+onError: Error: item focused with '.only' is not allowed due to the '--forbid-only' CLI flag: "a.test.ts pass" @ a.test.ts:3
+onEnd
+onExit
+`);
+    });
+
+    test('should report no-tests error to reporter', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: './reporter',
+          };
+        `
+      }, { 'reporter': '' });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toBe(`
+onBegin: 0 tests total
+onError: Error: No tests found @ <no location>
+onEnd
+onExit
+`);
+    });
+
+    test('should report require error to reporter', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: './reporter',
+          };
+        `,
+        'a.spec.js': `
+          throw new Error('Oh my!');
+        `,
+      }, { 'reporter': '' });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toBe(`
+onBegin: 0 tests total
+onError: Error: Oh my! @ a.spec.js:2
+onError: Error: No tests found @ <no location>
+onEnd
+onExit
+`);
+    });
+
+    test('should report global setup error to reporter', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: './reporter',
+            globalSetup: './globalSetup',
+          };
+        `,
+        'globalSetup.ts': `
+          module.exports = () => {
+            throw new Error('Oh my!');
+          };
+        `,
+        'a.spec.js': `
+          const { test, expect } = require('@playwright/test');
+          test('test', () => {});
+        `,
+      }, { 'reporter': '' });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toBe(`
+onBegin: 0 tests total
+onError: Error: Oh my! @ globalSetup.ts:3
+onEnd
+onExit
+`);
+    });
+
+    test('should report correct tests/suites when using grep', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'a.spec.js': `
+          import { test, expect } from '@playwright/test';
+
+          test.describe('@foo', () => {
+            test('test1', async ({ }) => {
+              console.log('%%test1');
+            });
+            test('test2', async ({ }) => {
+              console.log('%%test2');
+            });
+          });
+
+          test('test3', async ({ }) => {
+            console.log('%%test3');
+          });
+        `,
+      }, { 'grep': '@foo' });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain('%%test1');
+      expect(result.output).toContain('%%test2');
+      expect(result.output).not.toContain('%%test3');
+      const fileSuite = result.report.suites[0];
+      expect(fileSuite.suites!.length).toBe(1);
+      expect(fileSuite.suites![0].specs.length).toBe(2);
+      expect(fileSuite.specs.length).toBe(0);
+    });
+
+    test('should use sourceMap-based file suite names', async ({ runInlineTest }) => {
+      test.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/11028' });
+      const result = await runInlineTest({
+        'reporter.js': `
+          class Reporter {
+            onBegin(config, suite) {
+              console.log(suite.suites[0].suites[0].location.file);
+            }
+          }
+          module.exports = Reporter;
+        `,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: './reporter',
+          };
+        `,
+        'a.spec.js':
+`var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __markAsModule = (target) => __defProp(target, "__esModule", { value: true });
+var __reExport = (target, module2, desc) => {
+  if (module2 && typeof module2 === "object" || typeof module2 === "function") {
+    for (let key of __getOwnPropNames(module2))
+      if (!__hasOwnProp.call(target, key) && key !== "default")
+        __defProp(target, key, { get: () => module2[key], enumerable: !(desc = __getOwnPropDesc(module2, key)) || desc.enumerable });
+  }
+  return target;
+};
+var __toModule = (module2) => {
+  return __reExport(__markAsModule(__defProp(module2 != null ? __create(__getProtoOf(module2)) : {}, "default", module2 && module2.__esModule && "default" in module2 ? { get: () => module2.default, enumerable: true } : { value: module2, enumerable: true })), module2);
+};
+var import_test = __toModule(require("@playwright/test"));
+(0, import_test.test)("pass", async () => {
+});
+//# sourceMappingURL=data:application/json;base64,ewogICJ2ZXJzaW9uIjogMywKICAic291cmNlcyI6IFsiLi4vc3JjL2Euc3BlYy50cyJdLAogICJzb3VyY2VzQ29udGVudCI6IFsiaW1wb3J0IHsgdGVzdCB9IGZyb20gXCJAcGxheXdyaWdodC90ZXN0XCI7XG5cbnRlc3QoJ3Bhc3MnLCBhc3luYyAoKSA9PiB7fSk7Il0sCiAgIm1hcHBpbmdzIjogIjs7Ozs7Ozs7Ozs7Ozs7Ozs7O0FBQUEsa0JBQXFCO0FBRXJCLHNCQUFLLFFBQVEsWUFBWTtBQUFBOyIsCiAgIm5hbWVzIjogW10KfQo=`,
+      }, { 'reporter': '' });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain('a.spec.ts');
+    });
+
+    test('parallelIndex is presented in onTestEnd', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': `
+        class Reporter {
+          onTestEnd(test, result) {
+            console.log('parallelIndex: ' + result.parallelIndex)
+          }
+        }
+        module.exports = Reporter;`,
+        'playwright.config.ts': `
+          module.exports = {
+            reporter: './reporter',
+          };
+        `,
+        'a.spec.js': `
+          const { test, expect } = require('@playwright/test');
+          test('test', () => {});
+        `,
+      }, { 'reporter': '', 'workers': 1 });
+
+      expect(result.output).toContain('parallelIndex: 0');
+    });
+
+    test('test and step error should have code snippet', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'playwright.config.ts': `module.exports = { reporter: [['./reporter', { printSteps: true, printErrorSnippet: true }]] };`,
+        'a.spec.js': `
+          const { test, expect } = require('@playwright/test');
+          test('test', async () => {
+            await test.step('step', async () => {
+              expect(1).toBe(2);
+            });
+          });
+        `,
+      }, { 'reporter': '', 'workers': 1 });
+      expect(result.output).toBe(`
+onBegin: 1 tests total
+onTestBegin:  > a.spec.js > test; retry #0
+onStepEnd: [hook] Before Hooks
+onStepEnd: [expect] Expect "toBe"
+  error: Error: expect(received).toBe(expected) // Object.is equality @ a.spec.js:5
+  ======
+    3 |           test('test', async () => {
+    4 |             await test.step('step', async () => {
+  > 5 |               expect(1).toBe(2);
+      |                         ^
+    6 |             });
+    7 |           });
+    8 |
+  ======
+onStepEnd: [test.step] step
+  error: Error: expect(received).toBe(expected) // Object.is equality @ a.spec.js:5
+  ======
+    3 |           test('test', async () => {
+    4 |             await test.step('step', async () => {
+  > 5 |               expect(1).toBe(2);
+      |                         ^
+    6 |             });
+    7 |           });
+    8 |
+  ======
+onStepEnd: [hook] After Hooks
+onStepEnd: [hook] Worker Cleanup
+onTestEnd:  > a.spec.js > test; retry #0
+  error: Error: expect(received).toBe(expected) // Object.is equality @ a.spec.js:5
+  ======
+    3 |           test('test', async () => {
+    4 |             await test.step('step', async () => {
+  > 5 |               expect(1).toBe(2);
+      |                         ^
+    6 |             });
+    7 |           });
+    8 |
+  ======
+onEnd
+onExit
+`);
+    });
+
+    test('onError should have code snippet', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': smallReporterJS,
+        'playwright.config.ts': `module.exports = { reporter: [['./reporter', { printSteps: true, printErrorSnippet: true }]] };`,
+        'a.spec.js': `
+          const { test, expect } = require('@playwright/test');
+          throw new Error('test');
+        `,
+      }, { 'reporter': '', 'workers': 1 });
+
+      expect(result.output).toBe(`
+onBegin: 0 tests total
+onError: Error: test @ a.spec.js:3
+  ======
+     at a.spec.js:3
+
+    1 |
+    2 |           const { test, expect } = require('@playwright/test');
+  > 3 |           throw new Error('test');
+      |                 ^
+    4 |
+  ======
+onError: Error: No tests found @ <no location>
+onEnd
+onExit
+`);
+    });
+
+    test('onError receives workerInfo for fixture teardown errors (#39063)', async ({ runInlineTest }) => {
+      const result = await runInlineTest({
+        'reporter.ts': `
+          class Reporter {
+            printsToStdio() { return true; }
+            onError(error, workerInfo) {
+              console.log('teardownError:'
+                + ' message=' + (error.message || '').split('\\n')[0]
+                + ' workerInfo=' + (workerInfo ? typeof workerInfo.workerIndex + '/' + typeof workerInfo.parallelIndex + '/' + workerInfo.project.name : 'undefined'));
+            }
+          }
+          module.exports = Reporter;
+        `,
+        'playwright.config.ts': `module.exports = { projects: [{ name: 'foo' }], reporter: './reporter.ts' };`,
+        'a.spec.ts': `
+          import { test as base } from '@playwright/test';
+          const test = base.extend<{}, { brokenWorker: void }>({
+            brokenWorker: [async ({}, use) => {
+              await use();
+              throw new Error('teardown failed');
+            }, { scope: 'worker' }],
+          });
+          test('uses worker fixture', async ({ brokenWorker }) => {});
+        `,
+      }, { reporter: '', workers: 1 });
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain('teardownError: message=Error: teardown failed workerInfo=number/number/foo');
+    });
+  });
+}
+
+test('should report a stable test.id', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'reporter.ts': `
       class Reporter {
-        constructor(options) {
-          this.options = options;
-        }
-        onBegin(config, suite) {
-          console.log('\\n%%reporter-begin-' + this.options.begin + '%%');
-          console.log('\\n%%version-' + config.version);
-        }
         onTestBegin(test) {
-          const projectName = test.titlePath()[1];
-          console.log('\\n%%reporter-testbegin-' + test.title + '-' + projectName + '%%');
-          const suite = test.parent;
-          if (!suite.tests.includes(test))
-            console.log('\\n%%error-inconsistent-parent');
-          if (test.parent.project().name !== projectName)
-            console.log('\\n%%error-inconsistent-project-name');
-        }
-        onStdOut() {
-          console.log('\\n%%reporter-stdout%%');
-        }
-        onStdErr() {
-          console.log('\\n%%reporter-stderr%%');
-        }
-        onTestEnd(test, result) {
-          console.log('\\n%%reporter-testend-' + test.title + '-' + test.titlePath()[1] + '%%');
-          if (!result.startTime)
-            console.log('\\n%%error-no-start-time');
-        }
-        onTimeout() {
-          console.log('\\n%%reporter-timeout%%');
-        }
-        onError() {
-          console.log('\\n%%reporter-error%%');
-        }
-        async onEnd() {
-          await new Promise(f => setTimeout(f, 500));
-          console.log('\\n%%reporter-end-' + this.options.end + '%%');
+          console.log('\\n%%testbegin-' + test.id);
         }
       }
       export default Reporter;
     `,
     'playwright.config.ts': `
+      module.exports = { reporter: [[ './reporter.ts' ]] };
+    `,
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      test('example test', async ({}) => {
+      });
+    `
+  }, { reporter: '', workers: 1 });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.outputLines).toEqual([
+    'testbegin-20289bcdad95a5e18c38-8b63c3695b9c8bd62d98',
+  ]);
+});
+
+test('should report annotations from test declaration', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'reporter.ts': `
+      export default class Reporter {
+        onBegin(config, suite) {
+          const visit = suite => {
+            for (const test of suite.tests || []) {
+              const annotations = test.annotations.map(a => {
+                const description = a.description ? a.type + '=' + a.description : a.type;
+                const location = a.location ? '(' + a.location.line + ':' + a.location.column + ')' : '';
+                return description + location;
+              });
+              console.log('\\n%%title=' + test.title + ', annotations=' + annotations.join(','));
+            }
+            for (const child of suite.suites || [])
+              visit(child);
+          };
+          visit(suite);
+        }
+        onError(error) {
+          console.log(error);
+        }
+      }
+    `,
+    'playwright.config.ts': `
       module.exports = {
-        reporter: [
-          [ './reporter.ts', { begin: 'begin', end: 'end' } ]
+        reporter: './reporter',
+      };
+    `,
+    'stdio.spec.js': `
+      import { test, expect } from '@playwright/test';
+      test('none', () => {
+        expect(test.info().annotations).toEqual([]);
+      });
+      test('foo', { annotation: { type: 'foo' } }, () => {
+        expect(test.info().annotations).toEqual([{ type: 'foo', location: { file: expect.any(String), line: 6, column: 11 } }]);
+      });
+      test('foo-bar', {
+        annotation: [
+          { type: 'foo', description: 'desc' },
+          { type: 'bar' },
         ],
-        projects: [
-          { name: 'foo', repeatEach: 2 },
-          { name: 'bar' },
-        ],
-      };
-    `,
-    'a.test.ts': `
-      const { test } = pwt;
-      test('not run', async ({}) => {
-        console.log('log');
-        console.error('error');
-      });
-      test.only('is run', async ({}) => {
-        console.log('log');
-        console.error('error');
-      });
-    `
-  }, { reporter: '', workers: 1 });
-
-  expect(result.exitCode).toBe(0);
-  expect(result.output.split('\n').filter(line => line.startsWith('%%'))).toEqual([
-    '%%reporter-begin-begin%%',
-    '%%version-' + require('../../packages/playwright-test/package.json').version,
-    '%%reporter-testbegin-is run-foo%%',
-    '%%reporter-stdout%%',
-    '%%reporter-stderr%%',
-    '%%reporter-testend-is run-foo%%',
-    '%%reporter-testbegin-is run-foo%%',
-    '%%reporter-stdout%%',
-    '%%reporter-stderr%%',
-    '%%reporter-testend-is run-foo%%',
-    '%%reporter-testbegin-is run-bar%%',
-    '%%reporter-stdout%%',
-    '%%reporter-stderr%%',
-    '%%reporter-testend-is run-bar%%',
-    '%%reporter-end-end%%',
-  ]);
-});
-
-test('should work without a file extension', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'reporter.ts': smallReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-      };
-    `,
-    'a.test.ts': `
-      const { test } = pwt;
-      test('pass', async ({}) => {
-      });
-    `
-  }, { reporter: '', workers: 1 });
-
-  expect(result.exitCode).toBe(0);
-  expect(result.output.split('\n').filter(line => line.startsWith('%%'))).toEqual([
-    '%%begin',
-    '%%end',
-  ]);
-});
-
-test('should load reporter from node_modules', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'node_modules/my-reporter/index.js': smallReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: 'my-reporter',
-      };
-    `,
-    'a.test.ts': `
-      const { test } = pwt;
-      test('pass', async ({}) => {
-      });
-    `
-  }, { reporter: '', workers: 1 });
-
-  expect(result.exitCode).toBe(0);
-  expect(result.output.split('\n').filter(line => line.startsWith('%%'))).toEqual([
-    '%%begin',
-    '%%end',
-  ]);
-});
-
-test('should report expect steps', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'reporter.ts': stepsReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-      };
-    `,
-    'a.test.ts': `
-      const { test } = pwt;
-      test('fail', async ({}) => {
-        expect(true).toBeTruthy();
-        expect(false).toBeTruthy();
-      });
-      test('pass', async ({}) => {
-        expect(false).not.toBeTruthy();
-      });
-      test('async', async ({ page }) => {
-        await expect(page).not.toHaveTitle('False');
-      });
-    `
-  }, { reporter: '', workers: 1 });
-
-  expect(result.exitCode).toBe(1);
-  expect(result.output.split('\n').filter(line => line.startsWith('%%')).map(stripEscapedAscii)).toEqual([
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"expect.toBeTruthy\",\"category\":\"expect\"}`,
-    `%% end {\"title\":\"expect.toBeTruthy\",\"category\":\"expect\"}`,
-    `%% begin {\"title\":\"expect.toBeTruthy\",\"category\":\"expect\"}`,
-    `%% end {\"title\":\"expect.toBeTruthy\",\"category\":\"expect\",\"error\":{\"message\":\"expect(received).toBeTruthy()\\n\\nReceived: false\",\"stack\":\"<stack>\"}}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"expect.not.toBeTruthy\",\"category\":\"expect\"}`,
-    `%% end {\"title\":\"expect.not.toBeTruthy\",\"category\":\"expect\"}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\",\"steps\":[{\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}]}`,
-    `%% begin {\"title\":\"expect.not.toHaveTitle\",\"category\":\"expect\"}`,
-    `%% end {\"title\":\"expect.not.toHaveTitle\",\"category\":\"expect\"}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"browserContext.close\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"browserContext.close\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\",\"steps\":[{\"title\":\"browserContext.close\",\"category\":\"pw:api\"}]}`,
-  ]);
-});
-
-test('should report api steps', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'reporter.ts': stepsReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-      };
-    `,
-    'a.test.ts': `
-      const { test } = pwt;
-      test('pass', async ({ page, request }) => {
-        await Promise.all([
-          page.waitForNavigation(),
-          page.goto('data:text/html,<button></button>'),
+      }, () => {
+        expect(test.info().annotations).toEqual([
+          { type: 'foo', description: 'desc', location: { file: expect.any(String), line: 9, column: 11 } },
+          { type: 'bar', location: { file: expect.any(String), line: 9, column: 11 } },
         ]);
-        await page.click('button');
-        await page.request.get('http://localhost2').catch(() => {});
-        await request.get('http://localhost2').catch(() => {});
       });
-
-      test.describe('suite', () => {
-        let myPage;
-        test.beforeAll(async ({ browser }) => {
-          myPage = await browser.newPage();
-          await myPage.setContent('<button></button>');
+      test.skip('skip-foo', { annotation: { type: 'foo' } }, () => {
+      });
+      test.fixme('fixme-bar', { annotation: { type: 'bar' } }, () => {
+      });
+      test.fail('fail-foo-bar', {
+        annotation: [
+          { type: 'foo' },
+          { type: 'bar', description: 'desc' },
+        ],
+      }, () => {
+        expect(1).toBe(2);
+      });
+      test.describe('suite', { annotation: { type: 'foo' } }, () => {
+        test('foo-suite', () => {
+          expect(test.info().annotations).toEqual([{ type: 'foo', location: { file: expect.any(String), line: 32, column: 12 } }]);
         });
-
-        test('pass1', async () => {
-          await myPage.click('button');
+        test.describe('inner', { annotation: { type: 'bar' } }, () => {
+          test('foo-bar-suite', () => {
+            expect(test.info().annotations).toEqual([
+              { type: 'foo', location: { file: expect.any(String), line: 32, column: 12 } },
+              { type: 'bar', location: { file: expect.any(String), line: 36, column: 14 } }
+            ]);
+          });
         });
-        test('pass2', async () => {
-          await myPage.click('button');
+      });
+      test.describe.skip('skip-foo-suite', { annotation: { type: 'foo' } }, () => {
+        test('skip-foo-suite', () => {
         });
-
-        test.afterAll(async () => {
-          await myPage.close();
+      });
+      test.describe.fixme('fixme-bar-suite', { annotation: { type: 'bar' } }, () => {
+        test('fixme-bar-suite', () => {
         });
       });
     `
-  }, { reporter: '', workers: 1 });
-
+  });
   expect(result.exitCode).toBe(0);
-  expect(result.output.split('\n').filter(line => line.startsWith('%%')).map(stripEscapedAscii)).toEqual([
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\",\"steps\":[{\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}]}`,
-    `%% begin {\"title\":\"page.waitForNavigation\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"page.goto(data:text/html,<button></button>)\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.waitForNavigation\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.goto(data:text/html,<button></button>)\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"page.click(button)\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.click(button)\",\"category\":\"pw:api\"}`,
-    `%% begin {"title":"apiRequestContext.get(http://localhost2)","category":"pw:api"}`,
-    `%% end {"title":"apiRequestContext.get(http://localhost2)","category":"pw:api","error":{"message":"<message>","stack":"<stack>"}}`,
-    `%% begin {"title":"apiRequestContext.get(http://localhost2)","category":"pw:api"}`,
-    `%% end {"title":"apiRequestContext.get(http://localhost2)","category":"pw:api","error":{"message":"<message>","stack":"<stack>"}}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"apiRequestContext.dispose\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"apiRequestContext.dispose\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"browserContext.close\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"browserContext.close\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\",\"steps\":[{\"title\":\"apiRequestContext.dispose\",\"category\":\"pw:api\"},{\"title\":\"browserContext.close\",\"category\":\"pw:api\"}]}`,
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"browser.newPage\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"browser.newPage\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"page.setContent\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.setContent\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"page.click(button)\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.click(button)\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"page.click(button)\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.click(button)\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"page.close\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.close\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
+  expect(result.outputLines).toEqual([
+    `title=none, annotations=`,
+    `title=foo, annotations=foo(6:11)`,
+    `title=foo-bar, annotations=foo=desc(9:11),bar(9:11)`,
+    `title=skip-foo, annotations=foo(20:12),skip(20:12)`,
+    `title=fixme-bar, annotations=bar(22:12),fixme(22:12)`,
+    `title=fail-foo-bar, annotations=foo(24:12),bar=desc(24:12),fail(24:12)`,
+    `title=foo-suite, annotations=foo(32:12)`,
+    `title=foo-bar-suite, annotations=foo(32:12),bar(36:14)`,
+    `title=skip-foo-suite, annotations=foo(45:21),skip(45:21)`,
+    `title=fixme-bar-suite, annotations=bar(49:21),fixme(49:21)`,
   ]);
 });
 
-
-test('should report api step failure', async ({ runInlineTest }) => {
+test('attachments.push should not be enumerable to allow toEqual comparisons', async ({ runInlineTest }) => {
   const result = await runInlineTest({
-    'reporter.ts': stepsReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-      };
-    `,
-    'a.test.ts': `
-      const { test } = pwt;
-      test('fail', async ({ page }) => {
-        await page.setContent('<button></button>');
-        await page.click('input', { timeout: 1 });
-      });
-    `
-  }, { reporter: '', workers: 1 });
+    'a.spec.js': `
+      import { test, expect } from '@playwright/test';
+      test('test.info().attachments.push should not be enumerable', async ({}) => {
 
-  expect(result.exitCode).toBe(1);
-  expect(result.output.split('\n').filter(line => line.startsWith('%%')).map(stripEscapedAscii)).toEqual([
-    `%% begin {\"title\":\"Before Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"Before Hooks\",\"category\":\"hook\",\"steps\":[{\"title\":\"browserContext.newPage\",\"category\":\"pw:api\"}]}`,
-    `%% begin {\"title\":\"page.setContent\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.setContent\",\"category\":\"pw:api\"}`,
-    `%% begin {\"title\":\"page.click(input)\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"page.click(input)\",\"category\":\"pw:api\",\"error\":{\"message\":\"page.click: Timeout 1ms exceeded.\\n=========================== logs ===========================\\nwaiting for selector \\\"input\\\"\\n============================================================\",\"stack\":\"<stack>\"}}`,
-    `%% begin {\"title\":\"After Hooks\",\"category\":\"hook\"}`,
-    `%% begin {\"title\":\"browserContext.close\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"browserContext.close\",\"category\":\"pw:api\"}`,
-    `%% end {\"title\":\"After Hooks\",\"category\":\"hook\",\"steps\":[{\"title\":\"browserContext.close\",\"category\":\"pw:api\"}]}`,
+        const attachments = test.info().attachments;
+
+        const descriptor = Object.getOwnPropertyDescriptor(attachments, 'push');
+        expect(descriptor).toBeTruthy();
+        expect(descriptor.enumerable).toBe(false);
+
+        expect(Object.keys(attachments)).not.toContain('push');
+
+        await test.info().attach('file1', { body: 'content1', contentType: 'text/plain' });
+        await test.info().attach('file2', { body: 'content2', contentType: 'text/plain' });
+
+        const keys = Object.keys(attachments);
+        expect(keys.every(k => !isNaN(Number(k)))).toBe(true);
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(1);
+});
+
+test('tests skipped in serial mode receive onTestBegin/onTestEnd', async ({ runInlineTest }) => {
+  test.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/28321' });
+
+  const result = await runInlineTest({
+    'reporter.ts': smallReporterJS,
+    'playwright.config.ts': `module.exports = { reporter: [['./reporter', { printTestStatus: true }]] };`,
+    'a.spec.ts': `
+      import { test, expect } from '@playwright/test';
+
+      test.describe.configure({ mode: 'serial', retries: 1 });
+
+      test('test1', () => {
+        expect(test.info().retry).toBe(1);
+      });
+
+      test('test2', () => {
+      });
+    `,
+  }, { 'reporter': '', 'workers': 1 });
+
+  expect(result.output).toBe(`
+onBegin: 2 tests total
+onTestBegin:  > a.spec.ts > test1; retry #0
+onTestEnd: [failed]  > a.spec.ts > test1; retry #0
+  error: Error: expect(received).toBe(expected) // Object.is equality @ a.spec.ts:7
+onTestBegin:  > a.spec.ts > test2; retry #0
+onTestEnd: [skipped]  > a.spec.ts > test2; retry #0
+onTestBegin:  > a.spec.ts > test1; retry #1
+onTestEnd: [passed]  > a.spec.ts > test1; retry #1
+onTestBegin:  > a.spec.ts > test2; retry #1
+onTestEnd: [passed]  > a.spec.ts > test2; retry #1
+onEnd
+onExit
+`);
+});
+
+test('step attachments are referentially equal to result attachments', async ({ runInlineTest }) => {
+  class TestReporter implements Reporter {
+    onStepEnd(test: TestCase, result: TestResult, step: TestStep) {
+      console.log('%%%', JSON.stringify({
+        title: step.title,
+        attachments: step.attachments.map(a => result.attachments.indexOf(a)),
+      }));
+    }
+  }
+  const result = await runInlineTest({
+    'reporter.ts': `module.exports = ${TestReporter.toString()}`,
+    'playwright.config.ts': `module.exports = { reporter: './reporter' };`,
+    'a.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      test('test', async ({}, testInfo) => {
+        await test.step('step', async () => {
+          testInfo.attachments.push({ name: 'attachment', body: Buffer.from('content') });
+        });
+      });
+    `,
+  }, { 'reporter': '', 'workers': 1 });
+
+  const steps = result.outputLines.map(line => JSON.parse(line));
+  expect(steps).toEqual([
+    { title: 'Before Hooks', attachments: [] },
+    { title: 'step', attachments: [0] },
+    { title: 'After Hooks', attachments: [] },
   ]);
 });
 
-test('should not have internal error when steps are finished after timeout', async ({ runInlineTest }) => {
+test('step.attach attachments are reported on right steps', async ({ runInlineTest }) => {
+  class TestReporter implements Reporter {
+    onStepEnd(test: TestCase, result: TestResult, step: TestStep) {
+      console.log('%%%', JSON.stringify({
+        title: step.title,
+        attachments: step.attachments.map(a => ({ ...a, body: a.body.toString('utf8') })),
+      }));
+    }
+  }
   const result = await runInlineTest({
-    'a.test.ts': `
-      const test = pwt.test.extend({
-        page: async ({ page }, use) => {
-          await use(page);
-          // Timeout in fixture teardown that will resolve on browser.close.
-          await page.waitForNavigation();
-        },
+    'reporter.ts': `module.exports = ${TestReporter.toString()}`,
+    'playwright.config.ts': `module.exports = { reporter: './reporter' };`,
+    'a.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      test.beforeAll(async () => {
+        await test.step('step in beforeAll', async (step) => {
+          await step.attach('attachment1', { body: 'content1' });
+        });
       });
-      test('pass', async ({ page }) => {
-        // Timeout in the test.
-        await page.click('foo');
+      test('test', async () => {
+        await test.step('step', async (step) => {
+          await step.attach('attachment2', { body: 'content2' });
+        });
       });
-    `
-  }, { workers: 1, timeout: 1000, reporter: 'dot', retries: 1 });
-
-  expect(result.exitCode).toBe(1);
-  expect(result.failed).toBe(1);
-  expect(result.output).not.toContain('Internal error');
-});
-
-test('should show nice stacks for locators', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'reporter.ts': stepsReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-      };
     `,
-    'a.test.ts': `
-      const { test } = pwt;
-      test('pass', async ({ page }) => {
-        await page.setContent('<button></button>');
-        const locator = page.locator('button');
-        await locator.evaluate(e => e.innerText);
-      });
-    `
-  }, { reporter: '', workers: 1 });
+  }, { 'reporter': '', 'workers': 1 });
 
-  expect(result.exitCode).toBe(0);
-  expect(result.passed).toBe(0);
-  expect(result.output).not.toContain('Internal error');
-  expect(result.output.split('\n').filter(line => line.startsWith('%%')).map(stripEscapedAscii)).toEqual([
-    `%% begin {"title":"Before Hooks","category":"hook"}`,
-    `%% begin {"title":"browserContext.newPage","category":"pw:api"}`,
-    `%% end {"title":"browserContext.newPage","category":"pw:api"}`,
-    `%% end {"title":"Before Hooks","category":"hook","steps":[{"title":"browserContext.newPage","category":"pw:api"}]}`,
-    `%% begin {"title":"page.setContent","category":"pw:api"}`,
-    `%% end {"title":"page.setContent","category":"pw:api"}`,
-    `%% begin {"title":"locator.evaluate(button)","category":"pw:api"}`,
-    `%% end {"title":"locator.evaluate(button)","category":"pw:api"}`,
-    `%% begin {"title":"After Hooks","category":"hook"}`,
-    `%% begin {"title":"browserContext.close","category":"pw:api"}`,
-    `%% end {"title":"browserContext.close","category":"pw:api"}`,
-    `%% end {"title":"After Hooks","category":"hook","steps":[{"title":"browserContext.close","category":"pw:api"}]}`,
+  const steps = result.outputLines.map(line => JSON.parse(line));
+  expect(steps).toEqual([
+    { title: 'step in beforeAll', attachments: [{ body: 'content1', contentType: 'text/plain', name: 'attachment1' }] },
+    { title: 'beforeAll hook', attachments: [] },
+    { title: 'Before Hooks', attachments: [] },
+    { title: 'step', attachments: [{ body: 'content2', contentType: 'text/plain', name: 'attachment2' }] },
+    { title: 'After Hooks', attachments: [] },
   ]);
 });
 
-test('should report forbid-only error to reporter', async ({ runInlineTest }) => {
+test('attachments are reported in onStepEnd', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/14364' } }, async ({ runInlineTest }) => {
+  class TestReporter implements Reporter {
+    onStepEnd(test: TestCase, result: TestResult, step: TestStep) {
+      console.log(`%%[${step.category}] ${step.title}: ${result.attachments.length} attachments in result`);
+    }
+  }
   const result = await runInlineTest({
-    'reporter.ts': smallReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-      };
-    `,
-    'a.test.ts': `
-      pwt.test.only('pass', () => {});
-    `
-  }, { 'reporter': '', 'forbid-only': true });
-
-  expect(result.exitCode).toBe(1);
-  expect(result.output).toContain(`%%got error: =====================================\n --forbid-only found a focused test.`);
-});
-
-test('should report no-tests error to reporter', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'reporter.ts': smallReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-      };
-    `
-  }, { 'reporter': '' });
-
-  expect(result.exitCode).toBe(1);
-  expect(result.output).toContain(`%%got error: =================\n no tests found.`);
-});
-
-test('should report require error to reporter', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'reporter.ts': smallReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-      };
-    `,
-    'a.spec.js': `
-      throw new Error('Oh my!');
-    `,
-  }, { 'reporter': '' });
-
-  expect(result.exitCode).toBe(1);
-  expect(result.output).toContain(`%%got error: Oh my!`);
-});
-
-test('should report global setup error to reporter', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'reporter.ts': smallReporterJS,
-    'playwright.config.ts': `
-      module.exports = {
-        reporter: './reporter',
-        globalSetup: './globalSetup',
-      };
-    `,
-    'globalSetup.ts': `
-      module.exports = () => {
-        throw new Error('Oh my!');
-      };
-    `,
-    'a.spec.js': `
-      pwt.test('test', () => {});
-    `,
-  }, { 'reporter': '' });
-
-  expect(result.exitCode).toBe(1);
-  expect(result.output).toContain(`%%got error: Oh my!`);
-});
-
-test('should report correct tests/suites when using grep', async ({ runInlineTest }) => {
-  const result = await runInlineTest({
-    'a.spec.js': `
-      const { test } = pwt;
-
-      test.describe('@foo', () => {
-        test('test1', async ({ }) => {
-          console.log('%%test1');
+    'reporter.ts': `module.exports = ${TestReporter.toString()}`,
+    'playwright.config.ts': `module.exports = { reporter: './reporter' };`,
+    'a.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      test('test', async ({}, testInfo) => {
+        await test.step('step', async () => {
+          testInfo.attachments.push({ name: 'attachment', body: Buffer.from('content') });
         });
-        test('test2', async ({ }) => {
-          console.log('%%test2');
-        });
-      });
 
-      test('test3', async ({ }) => {
-        console.log('%%test3');
+        await testInfo.attach('4', {body:'444'})
       });
     `,
-  }, { 'grep': '@foo' });
+  }, { 'reporter': '', 'workers': 1 });
+
+  expect(result.outputLines).toEqual([
+    '[hook] Before Hooks: 0 attachments in result',
+    '[test.step] step: 1 attachments in result',
+    '[test.attach] Attach "4": 2 attachments in result',
+    '[hook] After Hooks: 2 attachments in result',
+  ]);
+});
+
+test('should have static annotations on result when all tests are skipped', async ({ runInlineTest }) => {
+  class TestReporter implements Reporter {
+    onTestEnd(test: TestCase, result: TestResult): void {
+      for (const annotation of result.annotations)
+        console.log(`%%annotation: ${annotation.type} ${annotation.description || ''}`);
+    }
+  }
+
+  const result = await runInlineTest({
+    'reporter.ts': `module.exports = ${TestReporter.toString()}`,
+    'playwright.config.ts': `module.exports = { reporter: './reporter' };`,
+    'a.spec.ts': `
+      import { test } from '@playwright/test';
+      test.skip('test', {
+        annotation: [{ type: 'foo', description: 'desc' }, { type: 'bar' }],
+      }, async () => {});
+    `,
+  }, { 'reporter': '', 'workers': 1 });
+
+  expect(result.outputLines).toEqual([
+    'annotation: foo desc',
+    'annotation: bar',
+    'annotation: skip',
+  ]);
+
+  const resultMany = await runInlineTest({
+    'reporter.ts': `module.exports = ${TestReporter.toString()}`,
+    'playwright.config.ts': `module.exports = { reporter: './reporter' };`,
+    'a.spec.ts': `
+      import { test } from '@playwright/test';
+      test.skip('test', {
+        annotation: [{ type: 'foo', description: 'desc' }, { type: 'bar' }],
+      }, async () => {});
+
+      test.skip('test2', {
+        annotation: [{ type: 'foobar', description: 'another' }],
+      }, async () => {});
+
+      test.skip('test3', {
+        annotation: [{ type: 'warning', description: 'one more' }],
+      }, async () => {});
+    `,
+  }, { 'reporter': '', 'workers': 1 });
+
+  expect(resultMany.outputLines).toEqual([
+    'annotation: foo desc',
+    'annotation: bar',
+    'annotation: skip',
+    'annotation: foobar another',
+    'annotation: skip',
+    'annotation: warning one more',
+    'annotation: skip',
+  ]);
+});
+
+test('AggregateError sub-errors are spread into testInfo.errors', async ({ runInlineTest }) => {
+  class TestReporter implements Reporter {
+    onTestEnd(test: TestCase, result: TestResult): void {
+      for (const error of result.errors)
+        console.log(`%%${error.message ?? error.value}`);
+      // For the boxed-step case, also surface a frame from the test file so
+      // we can assert that the boxed-stack rewrite only applies to the
+      // top-level error and not to its sub-errors.
+      if (test.title === 'boxed step') {
+        for (const error of result.errors) {
+          const frame = (error.stack ?? '').split('\n').find(l => l.includes('a.spec.ts:'));
+          console.log(`%%FRAME ${error.message}: ${frame?.trim()}`);
+        }
+      }
+    }
+  }
+
+  const result = await runInlineTest({
+    'reporter.ts': `module.exports = ${TestReporter.toString()}`,
+    'playwright.config.ts': `module.exports = { reporter: './reporter' };`,
+    'a.spec.ts': `
+      import { test } from '@playwright/test';
+      test('basic', () => {
+        throw new AggregateError([new Error('a'), new Error('b')], 'parent');
+      });
+      test('nested', () => {
+        throw new AggregateError([
+          new AggregateError([new Error('a'), new Error('b')], 'inner'),
+          new Error('c'),
+        ], 'outer');
+      });
+      test('non-error entries', () => {
+        const err: any = new Error('parent');
+        err.errors = ['oops', { foo: 1 }, new Error('real')];
+        throw err;
+      });
+      test('boxed step', async () => {
+        const subA = new Error('sub a');
+        const subB = new Error('sub b');
+        const helper = async () => {
+          await test.step('boxed', async () => {
+            throw new AggregateError([subA, subB], 'top');
+          }, { box: true });
+        };
+        await helper();
+      });
+    `,
+  }, { 'reporter': '', 'workers': 1 });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.outputLines).toEqual([
+    'AggregateError: parent',
+    'Error: a',
+    'Error: b',
+    'AggregateError: outer',
+    'AggregateError: inner',
+    'Error: a',
+    'Error: b',
+    'Error: c',
+    'Error: parent',
+    `'oops'`,
+    '{ foo: 1 }',
+    'Error: real',
+    'AggregateError: top',
+    'Error: sub a',
+    'Error: sub b',
+    expect.stringMatching(/^FRAME AggregateError: top: at .*a\.spec\.ts:25:/),
+    expect.stringMatching(/^FRAME Error: sub a: at .*a\.spec\.ts:18:/),
+    expect.stringMatching(/^FRAME Error: sub b: at .*a\.spec\.ts:19:/),
+  ]);
+});
+
+test('--add-reporter should append to configured reporters instead of replacing them', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'configured-reporter.js': `
+      module.exports = class { onBegin() { console.log('FROM_CONFIGURED_REPORTER'); } };
+    `,
+    'added-reporter.js': `
+      module.exports = class { onBegin() { console.log('FROM_ADDED_REPORTER'); } };
+    `,
+    'playwright.config.ts': `module.exports = { reporter: [['./configured-reporter.js']] };`,
+    'a.spec.js': `
+      const { test } = require('@playwright/test');
+      test('test', () => {});
+    `,
+  }, { 'workers': 1 }, undefined, { additionalArgs: ['--add-reporter=./added-reporter.js'] });
 
   expect(result.exitCode).toBe(0);
-  expect(result.output).toContain('%%test1');
-  expect(result.output).toContain('%%test2');
-  expect(result.output).not.toContain('%%test3');
-  const fileSuite = result.report.suites[0];
-  expect(fileSuite.suites.length).toBe(1);
-  expect(fileSuite.suites[0].specs.length).toBe(2);
-  expect(fileSuite.specs.length).toBe(0);
+  expect(result.output).toContain('FROM_CONFIGURED_REPORTER');
+  expect(result.output).toContain('FROM_ADDED_REPORTER');
 });
-
-function stripEscapedAscii(str: string) {
-  return str.replace(/\\u00[a-z0-9][a-z0-9]\[[^m]+m/g, '');
-}

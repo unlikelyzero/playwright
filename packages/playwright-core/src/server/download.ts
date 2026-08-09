@@ -14,37 +14,50 @@
  * limitations under the License.
  */
 
-import path from 'path';
+import { assert } from '@isomorphic/assert';
+import { resolveWithinRoot } from '@utils/fileUtils';
 import { Page } from './page';
-import { assert } from '../utils/utils';
 import { Artifact } from './artifact';
 
 export class Download {
   readonly artifact: Artifact;
   readonly url: string;
+  private _uuid: string;
   private _page: Page;
   private _suggestedFilename: string | undefined;
 
-  constructor(page: Page, downloadsPath: string, uuid: string, url: string, suggestedFilename?: string) {
-    const unaccessibleErrorMessage = !page._browserContext._options.acceptDownloads ? 'Pass { acceptDownloads: true } when you are creating your browser context.' : undefined;
-    this.artifact = new Artifact(page, path.join(downloadsPath, uuid), unaccessibleErrorMessage, () => {
-      return this._page._browserContext._doCancelDownload(uuid);
-    });
+  constructor(page: Page, downloadsPath: string, uuid: string, url: string, suggestedFilename?: string, downloadFilename?: string) {
+    const unaccessibleErrorMessage = page.browserContext._options.acceptDownloads === 'deny' ? 'Pass { acceptDownloads: true } when you are creating your browser context.' : undefined;
+    const downloadPath = resolveWithinRoot(downloadsPath, downloadFilename ?? uuid);
+    if (!downloadPath)
+      throw new Error(`Download filename '${downloadFilename}' escapes download directory`);
+    this.artifact = new Artifact(page, downloadPath, unaccessibleErrorMessage, () => this.cancel());
     this._page = page;
     this.url = url;
+    this._uuid = uuid;
     this._suggestedFilename = suggestedFilename;
-    page._browserContext._downloads.add(this);
+    // Note: downloads are never removed from the context, so that we can delete them upon context closure.
+    page.browserContext._downloads.add(this);
     if (suggestedFilename !== undefined)
-      this._page.emit(Page.Events.Download, this);
+      this._fireDownloadEvent();
   }
 
-  _filenameSuggested(suggestedFilename: string) {
+  cancel() {
+    return this._page.browserContext.cancelDownload(this._uuid);
+  }
+
+  filenameSuggested(suggestedFilename: string) {
     assert(this._suggestedFilename === undefined);
     this._suggestedFilename = suggestedFilename;
-    this._page.emit(Page.Events.Download, this);
+    this._fireDownloadEvent();
   }
 
   suggestedFilename(): string {
     return this._suggestedFilename!;
+  }
+
+  private _fireDownloadEvent() {
+    this._page.instrumentation.onDownload(this._page, this);
+    this._page.emit(Page.Events.Download, this);
   }
 }

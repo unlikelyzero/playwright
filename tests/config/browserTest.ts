@@ -16,49 +16,122 @@
 
 import * as fs from 'fs';
 import * as os from 'os';
-import { PageTestFixtures, PageWorkerFixtures } from '../page/pageTestApi';
 import * as path from 'path';
-import type { BrowserContext, BrowserContextOptions, BrowserType, Page } from 'playwright-core';
-import { removeFolders } from 'playwright-core/lib/utils/utils';
 import { baseTest } from './baseTest';
-import { RemoteServer, RemoteServerOptions } from './remoteServer';
+import { RunServer, RemoteServer } from './remoteServer';
+import { utils } from '../../packages/playwright-core/lib/coreBundle';
+import { isBidiChannel, parseHar } from '../config/utils';
+import type { PageTestFixtures, PageWorkerFixtures } from '../page/pageTestApi';
+import type { RemoteServerOptions, PlaywrightServer } from './remoteServer';
+import type { BrowserContext, BrowserContextOptions, BrowserType, Page } from 'playwright-core';
+import type { Log } from '../../packages/trace/src/har';
+
+const { removeFolders, hostPlatform } = utils;
 
 export type BrowserTestWorkerFixtures = PageWorkerFixtures & {
   browserVersion: string;
+  defaultSameSiteCookieValue: string;
+  allowsThirdParty: boolean;
   browserMajorVersion: number;
   browserType: BrowserType;
   isAndroid: boolean;
   isElectron: boolean;
+  isHeadlessShell: boolean;
+  isFrozenWebkit: boolean;
+  isBidi: boolean;
 };
+
+interface StartRemoteServer {
+  (kind: 'run-server' | 'launchServer', options?: RemoteServerOptions): Promise<PlaywrightServer>;
+  (kind: 'launchServer', options?: RemoteServerOptions): Promise<RemoteServer>;
+}
 
 type BrowserTestTestFixtures = PageTestFixtures & {
   createUserDataDir: () => Promise<string>;
   launchPersistent: (options?: Parameters<BrowserType['launchPersistentContext']>[1]) => Promise<{ context: BrowserContext, page: Page }>;
-  startRemoteServer: (options?: RemoteServerOptions) => Promise<RemoteServer>;
+  startRemoteServer: StartRemoteServer;
   contextFactory: (options?: BrowserContextOptions) => Promise<BrowserContext>;
+  pageWithHar(options?: { outputPath?: string, content?: 'embed' | 'attach' | 'omit', omitContent?: boolean }): Promise<{ context: BrowserContext, page: Page, getLog: () => Promise<Log>, getZip: () => Promise<Map<string, Buffer>> }>
 };
 
-const test = baseTest.extend<BrowserTestTestFixtures, BrowserTestWorkerFixtures>({
+type ContextFactory = (options?: BrowserContextOptions) => Promise<{ context: BrowserContext, close: () => Promise<void> }>;
+
+const test = baseTest.extend<BrowserTestTestFixtures & { _contextFactory: ContextFactory }, BrowserTestWorkerFixtures>({
   browserVersion: [async ({ browser }, run) => {
     await run(browser.version());
-  }, { scope: 'worker' } ],
+  }, { scope: 'worker' }],
 
-  browserType: [async ({ _browserType }: any, run) => {
-    await run(_browserType);
-  }, { scope: 'worker' } ],
+  browserType: [async ({ playwright, browserName, mode }, run) => {
+    await run(playwright[browserName]);
+  }, { scope: 'worker' }],
+
+  allowsThirdParty: [async ({ browserName, channel }, run) => {
+    if (browserName === 'firefox')
+      await run(true);
+    else
+      await run(false);
+  }, { scope: 'worker' }],
+
+  defaultSameSiteCookieValue: [async ({ browserName, platform, channel, isBidi }, run) => {
+    if (browserName === 'chromium' || isBidi)
+      await run('Lax');
+    else if (browserName === 'webkit' && (platform === 'linux' || channel === 'webkit-wsl'))
+      await run('Lax');
+    else if (browserName === 'webkit')
+      await run('None'); // Windows + older macOS
+    else if (browserName === 'firefox')
+      await run('None');
+    else
+      throw new Error('unknown browser - ' + browserName);
+  }, { scope: 'worker' }],
 
   browserMajorVersion: [async ({ browserVersion }, run) => {
     await run(Number(browserVersion.split('.')[0]));
-  }, { scope: 'worker' } ],
+  }, { scope: 'worker' }],
 
-  isAndroid: [false, { scope: 'worker' } ],
-  isElectron: [false, { scope: 'worker' } ],
+  isBidi: [async ({ channel }, use) => {
+    await use(isBidiChannel(channel));
+  }, { scope: 'worker' }],
 
-  contextFactory: async ({ _contextFactory }: any, run) => {
-    await run(_contextFactory);
+  isAndroid: [false, { scope: 'worker' }],
+  isElectron: [false, { scope: 'worker' }],
+  electronMajorVersion: [0, { scope: 'worker' }],
+
+  isHeadlessShell: [async ({ browserName, channel, headless }, use) => {
+    const isShell = channel === 'chromium-headless-shell' || (!channel && headless);
+    await use(browserName === 'chromium' && isShell);
+  }, { scope: 'worker' }],
+
+  isFrozenWebkit: [async ({ browserName, isMac, macVersion }, use) => {
+    await use(browserName === 'webkit' && (hostPlatform.startsWith('debian11') || hostPlatform.startsWith('ubuntu20.04') || (isMac && macVersion < 15)));
+  }, { scope: 'worker' }],
+
+  _contextFactory: async ({ _contextFactory }, use) => {
+    await use(async options => {
+      const result = await _contextFactory(options);
+      const { context } = result;
+      if (process.env.PW_CLOCK === 'frozen') {
+        await (context as any)._wrapApiCall(async () => {
+          await context.clock.install({ time: 0 });
+          await context.clock.pauseAt(1000);
+        }, { internal: true });
+      } else if (process.env.PW_CLOCK === 'realtime') {
+        await (context as any)._wrapApiCall(async () => {
+          await context.clock.install({ time: 0 });
+        }, { internal: true });
+      }
+      return result;
+    });
   },
 
-  createUserDataDir: async ({}, run) => {
+  contextFactory: async ({ _contextFactory }, run) => {
+    await run(async options => {
+      const { context } = await _contextFactory(options);
+      return context;
+    });
+  },
+
+  createUserDataDir: async ({ mode }, run) => {
     const dirs: string[] = [];
     // We do not put user data dir in testOutputPath,
     // because we do not want to upload them as test result artifacts.
@@ -74,7 +147,9 @@ const test = baseTest.extend<BrowserTestTestFixtures, BrowserTestWorkerFixtures>
     await removeFolders(dirs);
   },
 
-  launchPersistent: async ({ createUserDataDir, browserType }, run) => {
+  launchPersistent: async ({ createUserDataDir, browserType, mode }, run) => {
+    test.skip(mode !== 'default', 'Remote persistent contexts are not supported');
+
     let persistentContext: BrowserContext | undefined;
     await run(async options => {
       if (persistentContext)
@@ -88,17 +163,51 @@ const test = baseTest.extend<BrowserTestTestFixtures, BrowserTestWorkerFixtures>
       await persistentContext.close();
   },
 
-  startRemoteServer: async ({ childProcess, browserType }, run) => {
-    let remoteServer: RemoteServer | undefined;
-    await run(async options => {
-      if (remoteServer)
+  startRemoteServer: async ({ childProcess, browserType, channel, mode }, run) => {
+    test.skip(mode !== 'default', 'Starting remote server is not supported in remote modes');
+
+    let server: PlaywrightServer | undefined;
+    const fn = async (kind: 'launchServer' | 'run-server', options?: RemoteServerOptions) => {
+      if (server)
         throw new Error('can only start one remote server');
-      remoteServer = new RemoteServer();
-      await remoteServer._start(childProcess, browserType, options);
-      return remoteServer;
-    });
-    if (remoteServer)
-      await remoteServer.close();
+      if (kind === 'launchServer') {
+        const remoteServer = new RemoteServer();
+        await remoteServer._start(childProcess, browserType, channel, options);
+        server = remoteServer;
+      } else {
+        const runServer = new RunServer();
+        await runServer.start(childProcess, { artifactsDir: options?.artifactsDir });
+        server = runServer;
+      }
+      return server;
+    };
+    await run(fn as any);
+    if (server) {
+      await server.close();
+      // Give any connected browsers a chance to disconnect to avoid
+      // poisoning next test with quasy-alive browsers.
+      await new Promise(f => setTimeout(f, 1000));
+    }
+  },
+  pageWithHar: async ({ contextFactory }, use, testInfo) => {
+    const pageWithHar = async (options: { outputPath?: string, content?: 'embed' | 'attach' | 'omit', omitContent?: boolean } = {}) => {
+      const harPath = testInfo.outputPath(options.outputPath || 'test.har');
+      const context = await contextFactory({ recordHar: { path: harPath, content: options.content, omitContent: options.omitContent }, ignoreHTTPSErrors: true });
+      const page = await context.newPage();
+      return {
+        page,
+        context,
+        getLog: async () => {
+          await context.close();
+          return JSON.parse(fs.readFileSync(harPath).toString())['log'] as Log;
+        },
+        getZip: async () => {
+          await context.close();
+          return parseHar(harPath);
+        },
+      };
+    };
+    await use(pageWithHar);
   },
 });
 

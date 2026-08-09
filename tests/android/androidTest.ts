@@ -15,30 +15,39 @@
  */
 
 import { baseTest } from '../config/baseTest';
-import { PageTestFixtures, PageWorkerFixtures } from '../page/pageTestApi';
+import type { PageTestFixtures, PageWorkerFixtures } from '../page/pageTestApi';
 import type { AndroidDevice, BrowserContext } from 'playwright-core';
 export { expect } from '@playwright/test';
 
-type AndroidWorkerFixtures = PageWorkerFixtures & {
+type AndroidTestFixtures = {
   androidDevice: AndroidDevice;
+};
+
+type AndroidWorkerFixtures = PageWorkerFixtures & {
+  androidDeviceWorker: AndroidDevice;
   androidContext: BrowserContext;
 };
 
-export const androidTest = baseTest.extend<PageTestFixtures, AndroidWorkerFixtures>({
-  androidDevice: [async ({ playwright }, run) => {
+async function closeAllActivities(device: AndroidDevice) {
+  await device.shell('am force-stop com.google.android.googlequicksearchbox');
+  await device.shell('am force-stop org.chromium.webview_shell');
+  await device.shell('am force-stop com.android.chrome');
+}
+
+export const androidTest = baseTest.extend<PageTestFixtures & AndroidTestFixtures, AndroidWorkerFixtures>({
+  androidDeviceWorker: [async ({ playwright }, run) => {
     const device = (await playwright._android.devices())[0];
-    await device.shell('am force-stop org.chromium.webview_shell');
-    await device.shell('am force-stop com.android.chrome');
+    await closeAllActivities(device);
     device.setDefaultTimeout(90000);
     await run(device);
     await device.close();
   }, { scope: 'worker' }],
 
-  browserVersion: [async ({ androidDevice }, run) => {
-    const browserVersion = (await androidDevice.shell('dumpsys package com.android.chrome'))
+  browserVersion: [async ({ androidDeviceWorker }, run) => {
+    const browserVersion = (await androidDeviceWorker.shell('dumpsys package com.android.chrome'))
         .toString('utf8')
         .split('\n')
-        .find(line => line.includes('versionName='))
+        .find(line => line.includes('versionName='))!
         .trim()
         .split('=')[1];
     await run(browserVersion);
@@ -48,11 +57,21 @@ export const androidTest = baseTest.extend<PageTestFixtures, AndroidWorkerFixtur
     await run(Number(browserVersion.split('.')[0]));
   }, { scope: 'worker' }],
 
+  isBidi: [false, { scope: 'worker' }],
   isAndroid: [true, { scope: 'worker' }],
   isElectron: [false, { scope: 'worker' }],
+  electronMajorVersion: [0, { scope: 'worker' }],
+  isHeadlessShell: [false, { scope: 'worker' }],
+  isFrozenWebkit: [false, { scope: 'worker' }],
 
-  androidContext: [async ({ androidDevice }, run) => {
-    const context = await androidDevice.launchBrowser();
+  androidDevice: async ({ androidDeviceWorker }, use) => {
+    await closeAllActivities(androidDeviceWorker);
+    await use(androidDeviceWorker);
+    await closeAllActivities(androidDeviceWorker);
+  },
+
+  androidContext: [async ({ androidDeviceWorker }, run) => {
+    const context = await androidDeviceWorker.launchBrowser();
     const [page] = context.pages();
     await page.goto('data:text/html,Default page');
     await run(context);
@@ -62,7 +81,14 @@ export const androidTest = baseTest.extend<PageTestFixtures, AndroidWorkerFixtur
     // Retain default page, otherwise Clank will re-create it.
     while (androidContext.pages().length > 1)
       await androidContext.pages()[1].close();
-    const page = await androidContext.newPage();
-    await run(page);
+    await run(await androidContext.newPage());
+    const pages = androidContext.pages();
+    // Keep one fresh page - Clank does not like having zero pages.
+    await androidContext.newPage();
+    // Close all existing pages that could be stuck in a navigation, have an open dialog, etc.
+    for (const page of pages)
+      await page.close();
+    // Cleanup as much as we can. This requires a non-stuck page that can respond to CDP.
+    await androidContext.setStorageState({ cookies: [], origins: [] });
   },
 });

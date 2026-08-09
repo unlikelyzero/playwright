@@ -14,15 +14,25 @@
  * limitations under the License.
  */
 
-import * as frames from './frames';
-import * as types from './types';
-import { assert } from '../utils/utils';
-import { ManualPromise } from '../utils/async';
-import { SdkObject } from './instrumentation';
-import { NameValue } from '../common/types';
+import { ManualPromise } from '@isomorphic/manualPromise';
+import { assert } from '@isomorphic/assert';
+import { rewriteErrorMessage } from '@utils/stackTrace';
+import { isProtocolError } from './protocolError';
+import { BrowserContext } from './browserContext';
 import { APIRequestContext } from './fetch';
+import { SdkObject } from './instrumentation';
 
-export function filterCookies(cookies: types.NetworkCookie[], urls: string[]): types.NetworkCookie[] {
+import type * as contexts from './browserContext';
+import type * as frames from './frames';
+import type * as pages from './page';
+import type * as types from './types';
+import type { NormalizedContinueOverrides } from './types';
+import type { HeadersArray, NameValue } from '@isomorphic/types';
+import type * as channels from './channels';
+import type { Progress } from './progress';
+
+
+export function filterCookies(cookies: channels.NetworkCookie[], urls: string[]): channels.NetworkCookie[] {
   const parsedURLs = urls.map(s => new URL(s));
   // Chromiums's cookies are missing sameSite when it is 'None'
   return cookies.filter(c => {
@@ -36,7 +46,7 @@ export function filterCookies(cookies: types.NetworkCookie[], urls: string[]): t
         continue;
       if (!parsedURL.pathname.startsWith(c.path))
         continue;
-      if (parsedURL.protocol !== 'https:' && c.secure)
+      if (parsedURL.protocol !== 'https:' && !isLocalHostname(parsedURL.hostname) && c.secure)
         continue;
       return true;
     }
@@ -44,12 +54,78 @@ export function filterCookies(cookies: types.NetworkCookie[], urls: string[]): t
   });
 }
 
-export function rewriteCookies(cookies: types.SetNetworkCookieParam[]): types.SetNetworkCookieParam[] {
+export function isLocalHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname.endsWith('.localhost');
+}
+
+// Forbidden request headers according to https://developer.mozilla.org/en-US/docs/Glossary/Forbidden_request_header
+// These headers cannot be set or modified programmatically.
+const FORBIDDEN_HEADER_NAMES = new Set([
+  'accept-charset',
+  'accept-encoding',
+  'access-control-request-headers',
+  'access-control-request-method',
+  'connection',
+  'content-length',
+  'cookie',
+  'date',
+  'dnt',
+  'expect',
+  'host',
+  'keep-alive',
+  'origin',
+  'referer',
+  'set-cookie',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'via',
+]);
+
+// Forbidden method names for X-HTTP-Method-* headers
+const FORBIDDEN_METHODS = new Set(['CONNECT', 'TRACE', 'TRACK']);
+
+function isForbiddenHeader(name: string, value?: string): boolean {
+  const lowerName = name.toLowerCase();
+
+  if (FORBIDDEN_HEADER_NAMES.has(lowerName))
+    return true;
+
+  if (lowerName.startsWith('proxy-'))
+    return true;
+
+  if (lowerName.startsWith('sec-'))
+    return true;
+
+  if (lowerName === 'x-http-method' ||
+      lowerName === 'x-http-method-override' ||
+      lowerName === 'x-method-override') {
+    if (value && FORBIDDEN_METHODS.has(value.toUpperCase()))
+      return true;
+  }
+
+  return false;
+}
+
+export function applyHeadersOverrides(original: HeadersArray, overrides: HeadersArray): HeadersArray {
+  const forbiddenHeaders = original.filter(header => isForbiddenHeader(header.name, header.value));
+  const allowedHeaders = overrides.filter(header => !isForbiddenHeader(header.name, header.value));
+  return mergeHeaders([allowedHeaders, forbiddenHeaders]);
+}
+
+// Rollover to 5-digit year:
+// 253402300799 == Fri, 31 Dec 9999 23:59:59 +0000 (UTC)
+// 253402300800 == Sat,  1 Jan 1000 00:00:00 +0000 (UTC)
+export const kMaxCookieExpiresDateInSeconds = 253402300799;
+
+export function rewriteCookies(cookies: channels.SetNetworkCookie[]): channels.SetNetworkCookie[] {
   return cookies.map(c => {
-    assert(c.name, 'Cookie should have a name');
     assert(c.url || (c.domain && c.path), 'Cookie should have a url or a domain/path pair');
     assert(!(c.url && c.domain), 'Cookie should have either url or domain');
     assert(!(c.url && c.path), 'Cookie should have either url or path');
+    assert(!(c.expires && c.expires < 0 && c.expires !== -1), 'Cookie should have a valid expires, only -1 or a positive number for the unix timestamp in seconds is allowed');
+    assert(!(c.expires && c.expires > 0 && c.expires > kMaxCookieExpiresDateInSeconds), 'Cookie should have a valid expires, only -1 or a positive number for the unix timestamp in seconds is allowed');
     const copy = { ...c };
     if (copy.url) {
       assert(copy.url !== 'about:blank', `Blank page can not have cookie "${c.name}"`);
@@ -63,7 +139,7 @@ export function rewriteCookies(cookies: types.SetNetworkCookieParam[]): types.Se
   });
 }
 
-export function parsedURL(url: string): URL | null {
+export function parseURL(url: string): URL | null {
   try {
     return new URL(url);
   } catch (e) {
@@ -77,11 +153,23 @@ export function stripFragmentFromUrl(url: string): string {
   return url.substring(0, url.indexOf('#'));
 }
 
-type ResponseSize = {
-  encodedBodySize: number;
-  transferSize: number;
-  responseHeadersSize: number;
-};
+export type ResourceType = 'document'
+| 'stylesheet'
+| 'image'
+| 'media'
+| 'font'
+| 'script'
+| 'fetch'
+| 'xhr'
+| 'websocket'
+| 'eventsource'
+| 'manifest'
+| 'texttrack'
+| 'beacon'
+| 'ping'
+| 'cspreport'
+// 'prefetch', 'signedexchange', 'preflight', 'fedcm'
+| 'other';
 
 export class Request extends SdkObject {
   private _response: Response | null = null;
@@ -91,22 +179,32 @@ export class Request extends SdkObject {
   readonly _isFavicon: boolean;
   _failureText: string | null = null;
   private _url: string;
-  private _resourceType: string;
+  private _resourceType: ResourceType;
   private _method: string;
   private _postData: Buffer | null;
-  readonly _headers: types.HeadersArray;
-  private _headersMap = new Map<string, string>();
-  private _rawRequestHeadersPromise: ManualPromise<types.HeadersArray> | undefined;
-  private _frame: frames.Frame;
+  readonly _headers: HeadersArray;
+  readonly _frame: frames.Frame | null = null;
+  readonly _serviceWorker: pages.Worker | null = null;
+  readonly _context: contexts.BrowserContext;
+  private _rawRequestHeadersPromise = new ManualPromise<HeadersArray>();
   private _waitForResponsePromise = new ManualPromise<Response | null>();
   _responseEndTiming = -1;
-  readonly responseSize: ResponseSize = { encodedBodySize: 0, transferSize: 0, responseHeadersSize: 0 };
+  private _overrides: NormalizedContinueOverrides | undefined;
+  private _bodySize: number | undefined;
+  private _wallTimeMs: number | undefined;
+  _responseBodyOverride: { body: string; isBase64: boolean; } | undefined;
 
-  constructor(frame: frames.Frame, redirectedFrom: Request | null, documentId: string | undefined,
-    url: string, resourceType: string, method: string, postData: Buffer | null, headers: types.HeadersArray) {
-    super(frame, 'request');
+  static Events = {
+    Response: 'response',
+  };
+
+  constructor(context: contexts.BrowserContext, frame: frames.Frame | null, serviceWorker: pages.Worker | null, redirectedFrom: Request | null, documentId: string | undefined,
+    url: string, resourceType: ResourceType, method: string, postData: Buffer | null, headers: HeadersArray, wallTimeMs?: number) {
+    super(frame || context, 'request');
     assert(!url.startsWith('data:'), 'Data urls should not fire requests');
+    this._context = context;
     this._frame = frame;
+    this._serviceWorker = serviceWorker;
     this._redirectedFrom = redirectedFrom;
     if (redirectedFrom)
       redirectedFrom._redirectedTo = this;
@@ -116,9 +214,27 @@ export class Request extends SdkObject {
     this._method = method;
     this._postData = postData;
     this._headers = headers;
-    for (const { name, value } of this._headers)
-      this._headersMap.set(name.toLowerCase(), value);
+    this._wallTimeMs = wallTimeMs;
     this._isFavicon = url.endsWith('/favicon.ico') || !!redirectedFrom?._isFavicon;
+  }
+
+  wallTimeMs(): number | undefined {
+    return this._wallTimeMs;
+  }
+
+  async raceWithPageClosure<T>(progress: Progress, promise: Promise<T>): Promise<T> {
+    const scope = this._serviceWorker?.openScope ?? this._frame?._page.openScope;
+    if (scope)
+      return await progress.race(scope.race(promise));
+    return await progress.race(promise);
+  }
+
+  async rawRequestHeaders(progress: Progress): Promise<HeadersArray> {
+    return await this.raceWithPageClosure(progress, this.internalRawRequestHeaders());
+  }
+
+  async response(progress: Progress): Promise<Response | null> {
+    return await this.raceWithPageClosure(progress, this._waitForResponse());
   }
 
   _setFailureText(failureText: string) {
@@ -126,50 +242,51 @@ export class Request extends SdkObject {
     this._waitForResponsePromise.resolve(null);
   }
 
-  url(): string {
-    return this._url;
+  _applyOverrides(overrides: types.NormalizedContinueOverrides) {
+    this._overrides = { ...this._overrides, ...overrides };
+    return this._overrides;
   }
 
-  resourceType(): string {
+  overrides() {
+    return this._overrides;
+  }
+
+  url(): string {
+    return this._overrides?.url || this._url;
+  }
+
+  resourceType(): ResourceType {
     return this._resourceType;
   }
 
   method(): string {
-    return this._method;
+    return this._overrides?.method || this._method;
   }
 
   postDataBuffer(): Buffer | null {
-    return this._postData;
+    return this._overrides?.postData || this._postData;
   }
 
-  headers(): types.HeadersArray {
-    return this._headers;
+  headers(): HeadersArray {
+    return this._overrides?.headers || this._headers;
   }
 
   headerValue(name: string): string | undefined {
-    return this._headersMap.get(name);
+    const lowerCaseName = name.toLowerCase();
+    return this.headers().find(h => h.name.toLowerCase() === lowerCaseName)?.value;
   }
 
-  setWillReceiveExtraHeaders() {
-    if (!this._rawRequestHeadersPromise)
-      this._rawRequestHeadersPromise = new ManualPromise();
+  // "null" means no raw headers available - we'll use provisional headers as raw headers.
+  setRawRequestHeaders(headers: HeadersArray | null) {
+    if (!this._rawRequestHeadersPromise.isDone())
+      this._rawRequestHeadersPromise.resolve(headers || this._headers);
   }
 
-  setRawRequestHeaders(headers: types.HeadersArray) {
-    if (!this._rawRequestHeadersPromise)
-      this._rawRequestHeadersPromise = new ManualPromise();
-    this._rawRequestHeadersPromise!.resolve(headers);
+  async internalRawRequestHeaders(): Promise<HeadersArray> {
+    return this._overrides?.headers || this._rawRequestHeadersPromise;
   }
 
-  async rawRequestHeaders(): Promise<NameValue[]> {
-    return this._rawRequestHeadersPromise || Promise.resolve(this._headers);
-  }
-
-  rawRequestHeadersPromise(): Promise<types.HeadersArray> | undefined {
-    return this._rawRequestHeadersPromise;
-  }
-
-  response(): PromiseLike<Response | null> {
+  private _waitForResponse(): Promise<Response | null> {
     return this._waitForResponsePromise;
   }
 
@@ -180,14 +297,19 @@ export class Request extends SdkObject {
   _setResponse(response: Response) {
     this._response = response;
     this._waitForResponsePromise.resolve(response);
+    this.emit(Request.Events.Response, response);
   }
 
   _finalRequest(): Request {
     return this._redirectedTo ? this._redirectedTo._finalRequest() : this;
   }
 
-  frame(): frames.Frame {
+  frame(): frames.Frame | null {
     return this._frame;
+  }
+
+  serviceWorker(): pages.Worker | null {
+    return this._serviceWorker;
   }
 
   isNavigationRequest(): boolean {
@@ -206,19 +328,17 @@ export class Request extends SdkObject {
     };
   }
 
-  bodySize(): number {
-    return this.postDataBuffer()?.length || 0;
+  // TODO(bidi): remove once post body is available.
+  _setBodySize(size: number) {
+    this._bodySize = size;
   }
 
-  async requestHeadersSize(): Promise<number> {
-    let headersSize = 4; // 4 = 2 spaces + 2 line breaks (GET /path \r\n)
-    headersSize += this.method().length;
-    headersSize += (new URL(this.url())).pathname.length;
-    headersSize += 8; // httpVersion
-    const headers = this.rawRequestHeadersPromise() ? await this.rawRequestHeadersPromise()! : this._headers;
-    for (const header of headers)
-      headersSize += header.name.length + header.value.length + 4; // 4 = ': ' + '\r\n'
-    return headersSize;
+  bodySize(): number {
+    return this._bodySize || this.postDataBuffer()?.length || 0;
+  }
+
+  async _requestHeadersSize(): Promise<number> {
+    return requestHeadersSize(await this.internalRawRequestHeaders(), this.url(), this.method());
   }
 }
 
@@ -226,11 +346,27 @@ export class Route extends SdkObject {
   private readonly _request: Request;
   private readonly _delegate: RouteDelegate;
   private _handled = false;
+  private _currentHandler: RouteHandler | undefined;
+  private _futureHandlers: RouteHandler[] = [];
 
   constructor(request: Request, delegate: RouteDelegate) {
-    super(request.frame(), 'route');
+    super(request._frame || request._context, 'route');
     this._request = request;
     this._delegate = delegate;
+    this._request._context.addRouteInFlight(this);
+  }
+
+  handle(handlers: RouteHandler[]) {
+    this._futureHandlers = [...handlers];
+    this.continue({ isFallback: true }).catch(() => {});
+  }
+
+  async removeHandler(handler: RouteHandler) {
+    this._futureHandlers = this._futureHandlers.filter(h => h !== handler);
+    if (handler === this._currentHandler) {
+      await this.continue({ isFallback: true }).catch(() => {});
+      return;
+    }
   }
 
   request(): Request {
@@ -238,20 +374,26 @@ export class Route extends SdkObject {
   }
 
   async abort(errorCode: string = 'failed') {
-    assert(!this._handled, 'Route is already handled!');
-    this._handled = true;
+    this._startHandling();
+    this._request._context.emit(BrowserContext.Events.RequestAborted, this._request);
     await this._delegate.abort(errorCode);
+    this._endHandling();
   }
 
-  async fulfill(overrides: { status?: number, headers?: types.HeadersArray, body?: string, isBase64?: boolean, useInterceptedResponseBody?: boolean, fetchResponseUid?: string }) {
-    assert(!this._handled, 'Route is already handled!');
-    this._handled = true;
+  redirectNavigationRequest(url: string) {
+    this._startHandling();
+    assert(this._request.isNavigationRequest());
+    this._request.frame()!.redirectNavigation(url, this._request._documentId!, this._request.headerValue('referer'));
+    this._endHandling();
+  }
+
+  async fulfill(overrides: channels.RouteFulfillParams) {
+    this._startHandling();
     let body = overrides.body;
     let isBase64 = overrides.isBase64 || false;
     if (body === undefined) {
       if (overrides.fetchResponseUid) {
-        const context = this._request.frame()._page._browserContext;
-        const buffer = context.fetchRequest.fetchResponses.get(overrides.fetchResponseUid) || APIRequestContext.findResponseBody(overrides.fetchResponseUid);
+        const buffer = this._request._context.fetchRequest.fetchResponses.get(overrides.fetchResponseUid) || APIRequestContext.findResponseBody(overrides.fetchResponseUid);
         assert(buffer, 'Fetch response has been disposed');
         body = buffer.toString('base64');
         isBase64 = true;
@@ -259,24 +401,77 @@ export class Route extends SdkObject {
         body = '';
         isBase64 = false;
       }
+    } else if (!overrides.status || overrides.status < 200 || overrides.status >= 400) {
+      this._request._responseBodyOverride = { body, isBase64 };
     }
+    const headers = [...(overrides.headers || [])];
+    this._maybeAddCorsHeaders(headers);
+    this._request._context.emit(BrowserContext.Events.RequestFulfilled, this._request);
     await this._delegate.fulfill({
       status: overrides.status || 200,
-      headers: overrides.headers || [],
-      body,
+      headers,
+      body: body!,
       isBase64,
     });
+    this._endHandling();
   }
 
-  async continue(overrides: types.NormalizedContinueOverrides = {}) {
-    assert(!this._handled, 'Route is already handled!');
+  // See https://github.com/microsoft/playwright/issues/12929
+  private _maybeAddCorsHeaders(headers: NameValue[]) {
+    const origin = this._request.headerValue('origin');
+    if (!origin)
+      return;
+    const requestUrl = new URL(this._request.url());
+    if (!requestUrl.protocol.startsWith('http'))
+      return;
+    if (requestUrl.origin === origin.trim())
+      return;
+    const corsHeader = headers.find(({ name }) => name === 'access-control-allow-origin');
+    if (corsHeader)
+      return;
+    headers.push({ name: 'access-control-allow-origin', value: origin });
+    headers.push({ name: 'access-control-allow-credentials', value: 'true' });
+    headers.push({ name: 'vary', value: 'Origin' });
+  }
+
+  async continue(overrides: channels.RouteContinueParams) {
     if (overrides.url) {
       const newUrl = new URL(overrides.url);
       const oldUrl = new URL(this._request.url());
       if (oldUrl.protocol !== newUrl.protocol)
         throw new Error('New URL must have same protocol as overridden URL');
     }
-    await this._delegate.continue(this._request, overrides);
+    if (overrides.headers) {
+      // Filter out forbidden headers from overrides - they cannot be overridden
+      // and will be passed as-is from the original request
+      overrides.headers = applyHeadersOverrides(this._request._headers, overrides.headers);
+    }
+    overrides = this._request._applyOverrides(overrides);
+
+    const nextHandler = this._futureHandlers.shift();
+    if (nextHandler) {
+      this._currentHandler = nextHandler;
+      nextHandler(this, this._request);
+      return;
+    }
+
+    if (!overrides.isFallback)
+      this._request._context.emit(BrowserContext.Events.RequestContinued, this._request);
+    this._startHandling();
+    await this._delegate.continue(overrides);
+    this._endHandling();
+  }
+
+  private _startHandling() {
+    assert(!this._handled, 'Route is already handled!');
+    this._handled = true;
+    this._currentHandler = undefined;
+  }
+
+  private _endHandling() {
+    this._futureHandlers = [];
+    this._currentHandler = undefined;
+    this._request._context.removeRouteInFlight(this);
   }
 }
 
@@ -300,6 +495,7 @@ export type ResourceSizes = {
   requestHeadersSize: number,
   responseBodySize: number,
   responseHeadersSize: number,
+  transferSize: number,
 };
 
 export type RemoteAddr = {
@@ -308,31 +504,35 @@ export type RemoteAddr = {
 };
 
 export type SecurityDetails = {
-    protocol?: string;
-    subjectName?: string;
-    issuer?: string;
-    validFrom?: number;
-    validTo?: number;
+  protocol?: string;
+  subjectName?: string;
+  issuer?: string;
+  validFrom?: number;
+  validTo?: number;
 };
 
 export class Response extends SdkObject {
   private _request: Request;
   private _contentPromise: Promise<Buffer> | null = null;
-  _finishedPromise = new ManualPromise<void>();
+  private _finishedPromise = new ManualPromise<void>();
   private _status: number;
   private _statusText: string;
   private _url: string;
-  private _headers: types.HeadersArray;
+  private _headers: HeadersArray;
   private _headersMap = new Map<string, string>();
   private _getResponseBodyCallback: GetResponseBodyCallback;
   private _timing: ResourceTiming;
   private _serverAddrPromise = new ManualPromise<RemoteAddr | undefined>();
   private _securityDetailsPromise = new ManualPromise<SecurityDetails | undefined>();
-  private _rawResponseHeadersPromise: ManualPromise<types.HeadersArray> | undefined;
-  private _httpVersion: string | undefined;
+  private _rawResponseHeadersPromise = new ManualPromise<HeadersArray>();
+  private _httpVersionPromise = new ManualPromise<string | null>();
+  private _fromServiceWorker: boolean;
+  private _encodedBodySizePromise = new ManualPromise<number | null>();
+  private _transferSizePromise = new ManualPromise<number | null>();
+  private _responseHeadersSizePromise = new ManualPromise<number | null>();
 
-  constructor(request: Request, status: number, statusText: string, headers: types.HeadersArray, timing: ResourceTiming, getResponseBodyCallback: GetResponseBodyCallback, httpVersion?: string) {
-    super(request.frame(), 'response');
+  constructor(request: Request, status: number, statusText: string, headers: HeadersArray, timing: ResourceTiming, getResponseBodyCallback: GetResponseBodyCallback, fromServiceWorker: boolean) {
+    super(request.frame() || request._context, 'response');
     this._request = request;
     this._timing = timing;
     this._status = status;
@@ -343,7 +543,31 @@ export class Response extends SdkObject {
       this._headersMap.set(name.toLowerCase(), value);
     this._getResponseBodyCallback = getResponseBodyCallback;
     this._request._setResponse(this);
-    this._httpVersion = httpVersion;
+    this._fromServiceWorker = fromServiceWorker;
+  }
+
+  async body(progress: Progress): Promise<Buffer> {
+    return await this._request.raceWithPageClosure(progress, this.internalBody());
+  }
+
+  async securityDetails(progress: Progress): Promise<SecurityDetails | null> {
+    return await this._request.raceWithPageClosure(progress, this.internalSecurityDetails());
+  }
+
+  async serverAddr(progress: Progress): Promise<RemoteAddr | null> {
+    return await this._request.raceWithPageClosure(progress, this.internalServerAddr());
+  }
+
+  async rawResponseHeaders(progress: Progress): Promise<NameValue[]> {
+    return await this._request.raceWithPageClosure(progress, this.internalRawResponseHeaders());
+  }
+
+  async httpVersion(progress: Progress): Promise<string> {
+    return await this._request.raceWithPageClosure(progress, this.internalHttpVersion());
+  }
+
+  async sizes(progress: Progress): Promise<ResourceSizes> {
+    return await this._request.raceWithPageClosure(progress, this.internalSizes());
   }
 
   _serverAddrFinished(addr?: RemoteAddr) {
@@ -356,11 +580,14 @@ export class Response extends SdkObject {
 
   _requestFinished(responseEndTiming: number) {
     this._request._responseEndTiming = Math.max(responseEndTiming, this._timing.responseStart);
+    // Set start time equal to end when request is served from memory cache.
+    if (this._timing.requestStart === -1)
+      this._timing.requestStart = this._request._responseEndTiming;
     this._finishedPromise.resolve();
   }
 
-  _setHttpVersion(httpVersion: string) {
-    this._httpVersion = httpVersion;
+  _setHttpVersion(httpVersion: string | null) {
+    this._httpVersionPromise.resolve(httpVersion);
   }
 
   url(): string {
@@ -375,7 +602,7 @@ export class Response extends SdkObject {
     return this._statusText;
   }
 
-  headers(): types.HeadersArray {
+  headers(): HeadersArray {
     return this._headers;
   }
 
@@ -383,39 +610,56 @@ export class Response extends SdkObject {
     return this._headersMap.get(name);
   }
 
-  async rawResponseHeaders(): Promise<NameValue[]> {
-    return this._rawResponseHeadersPromise || Promise.resolve(this._headers);
+  // "null" means no raw headers available - we'll use provisional headers as raw headers.
+  setRawResponseHeaders(headers: HeadersArray | null) {
+    if (!this._rawResponseHeadersPromise.isDone())
+      this._rawResponseHeadersPromise.resolve(headers || this._headers);
   }
 
-  setWillReceiveExtraHeaders() {
-    this._request.setWillReceiveExtraHeaders();
-    this._rawResponseHeadersPromise = new ManualPromise();
+  setTransferSize(size: number | null) {
+    this._transferSizePromise.resolve(size);
   }
 
-  setRawResponseHeaders(headers: types.HeadersArray) {
-    if (!this._rawResponseHeadersPromise)
-      this._rawResponseHeadersPromise = new ManualPromise();
-    this._rawResponseHeadersPromise!.resolve(headers);
+  setEncodedBodySize(size: number | null) {
+    this._encodedBodySizePromise.resolve(size);
+  }
+
+  setResponseHeadersSize(size: number | null) {
+    this._responseHeadersSizePromise.resolve(size);
   }
 
   timing(): ResourceTiming {
     return this._timing;
   }
 
-  async serverAddr(): Promise<RemoteAddr|null> {
-    return await this._serverAddrPromise || null;
-  }
-
-  async securityDetails(): Promise<SecurityDetails|null> {
+  async internalSecurityDetails(): Promise<SecurityDetails|null> {
     return await this._securityDetailsPromise || null;
   }
 
-  body(): Promise<Buffer> {
+  async internalServerAddr(): Promise<RemoteAddr | null> {
+    return await this._serverAddrPromise || null;
+  }
+
+  async internalRawResponseHeaders(): Promise<HeadersArray> {
+    return await this._rawResponseHeadersPromise;
+  }
+
+  internalBody(): Promise<Buffer> {
     if (!this._contentPromise) {
       this._contentPromise = this._finishedPromise.then(async () => {
         if (this._status >= 300 && this._status <= 399)
           throw new Error('Response body is unavailable for redirect responses');
-        return this._getResponseBodyCallback();
+        if (this._request._responseBodyOverride) {
+          const { body, isBase64 } = this._request._responseBodyOverride;
+          return Buffer.from(body, isBase64 ? 'base64' : 'utf-8');
+        }
+        try {
+          return await this._getResponseBodyCallback();
+        } catch (e) {
+          if (isProtocolError(e) && e.type === 'error')
+            rewriteErrorMessage(e, e.message + '\nResponse body is not available for a response that was navigated away from. Read response.body() before triggering any navigation.');
+          throw e;
+        }
       });
     }
     return this._contentPromise;
@@ -425,53 +669,62 @@ export class Response extends SdkObject {
     return this._request;
   }
 
-  frame(): frames.Frame {
+  finished(): Promise<void> {
+    return this._finishedPromise;
+  }
+
+  frame(): frames.Frame | null {
     return this._request.frame();
   }
 
-  httpVersion(): string {
-    if (!this._httpVersion)
+  async internalHttpVersion(): Promise<string> {
+    const httpVersion = await this._httpVersionPromise || null;
+    if (!httpVersion)
       return 'HTTP/1.1';
-    if (this._httpVersion === 'http/1.1')
+    if (httpVersion === 'http/1.1')
       return 'HTTP/1.1';
-    if (this._httpVersion === 'h2')
+    if (httpVersion === 'h2')
       return 'HTTP/2.0';
-    return this._httpVersion;
+    return httpVersion;
   }
 
-  private async _responseHeadersSize(): Promise<number> {
-    if (this._request.responseSize.responseHeadersSize)
-      return this._request.responseSize.responseHeadersSize;
-    let headersSize = 4; // 4 = 2 spaces + 2 line breaks (HTTP/1.1 200 Ok\r\n)
-    headersSize += 8; // httpVersion;
-    headersSize += 3; // statusCode;
-    headersSize += this.statusText().length;
-    const headers = await this._bestEffortResponseHeaders();
-    for (const header of headers)
-      headersSize += header.name.length + header.value.length + 4; // 4 = ': ' + '\r\n'
-    headersSize += 2; // '\r\n'
-    return headersSize;
+  fromServiceWorker(): boolean {
+    return this._fromServiceWorker;
   }
 
-  private async _bestEffortResponseHeaders(): Promise<types.HeadersArray> {
-    return this._rawResponseHeadersPromise ? await this._rawResponseHeadersPromise : this._headers;
+  async responseHeadersSize(): Promise<number> {
+    const availableSize = await this._responseHeadersSizePromise;
+    if (availableSize !== null)
+      return availableSize;
+
+    // Fallback to calculating it manually.
+    return responseHeadersSize(await this._rawResponseHeadersPromise, this.statusText());
   }
 
-  async sizes(): Promise<ResourceSizes> {
-    await this._finishedPromise;
-    const requestHeadersSize = await this._request.requestHeadersSize();
-    const responseHeadersSize = await this._responseHeadersSize();
-    let { encodedBodySize } = this._request.responseSize;
-    if (!encodedBodySize) {
-      const headers = await this._bestEffortResponseHeaders();
+  async internalSizes(): Promise<ResourceSizes> {
+    const requestHeadersSize = await this._request._requestHeadersSize();
+    const responseHeadersSize = await this.responseHeadersSize();
+
+    let encodedBodySize = await this._encodedBodySizePromise;
+    if (encodedBodySize === null) {
+      // Fallback to calculating it manually.
+      const headers = await this._rawResponseHeadersPromise;
       const contentLength = headers.find(h => h.name.toLowerCase() === 'content-length')?.value;
       encodedBodySize = contentLength ? +contentLength : 0;
     }
+
+    let transferSize = await this._transferSizePromise;
+    if (transferSize === null) {
+      // Fallback to calculating it manually.
+      transferSize = responseHeadersSize + encodedBodySize;
+    }
+
     return {
       requestBodySize: this._request.bodySize(),
       requestHeadersSize,
       responseBodySize: encodedBodySize,
       responseHeadersSize,
+      transferSize,
     };
   }
 }
@@ -479,17 +732,24 @@ export class Response extends SdkObject {
 export class WebSocket extends SdkObject {
   private _url: string;
   private _notified = false;
+  private _wallTimeMs: number | undefined;
+  private _status: number | undefined;
+  private _statusText: string | undefined;
+  private _requestHeaders: HeadersArray | undefined;
+  private _responseHeaders: HeadersArray | undefined;
 
   static Events = {
     Close: 'close',
     SocketError: 'socketerror',
     FrameReceived: 'framereceived',
     FrameSent: 'framesent',
+    Request: 'request',
+    Response: 'response',
   };
 
   constructor(parent: SdkObject, url: string) {
     super(parent, 'ws');
-    this._url = url;
+    this._url = stripFragmentFromUrl(url);
   }
 
   markAsNotified() {
@@ -506,12 +766,28 @@ export class WebSocket extends SdkObject {
     return this._url;
   }
 
-  frameSent(opcode: number, data: string) {
-    this.emit(WebSocket.Events.FrameSent, { opcode, data });
+  wallTimeMs(): number | undefined {
+    return this._wallTimeMs;
   }
 
-  frameReceived(opcode: number, data: string) {
-    this.emit(WebSocket.Events.FrameReceived, { opcode, data });
+  setWallTimeMs(wallTimeMs: number | undefined) {
+    this._wallTimeMs = wallTimeMs;
+  }
+
+  requestSent(headers: HeadersArray) {
+    this.emit(WebSocket.Events.Request, { headers });
+  }
+
+  responseReceived(status: number, statusText: string, headers: HeadersArray) {
+    this.emit(WebSocket.Events.Response, { status, statusText, headers });
+  }
+
+  frameSent(opcode: number, data: string, wallTimeMs: number) {
+    this.emit(WebSocket.Events.FrameSent, { opcode, data, wallTimeMs });
+  }
+
+  frameReceived(opcode: number, data: string, wallTimeMs: number) {
+    this.emit(WebSocket.Events.FrameReceived, { opcode, data, wallTimeMs });
   }
 
   error(errorMessage: string) {
@@ -526,11 +802,11 @@ export class WebSocket extends SdkObject {
 export interface RouteDelegate {
   abort(errorCode: string): Promise<void>;
   fulfill(response: types.NormalizedFulfillResponse): Promise<void>;
-  continue(request: Request, overrides: types.NormalizedContinueOverrides): Promise<void>;
+  continue(overrides: types.NormalizedContinueOverrides): Promise<void>;
 }
 
 // List taken from https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml with extra 306 and 418 codes.
-export const STATUS_TEXTS: { [status: string]: string } = {
+const STATUS_TEXTS: { [status: string]: string } = {
   '100': 'Continue',
   '101': 'Switching Protocols',
   '102': 'Processing',
@@ -596,11 +872,15 @@ export const STATUS_TEXTS: { [status: string]: string } = {
   '511': 'Network Authentication Required',
 };
 
-export function singleHeader(name: string, value: string): types.HeadersArray {
+export function statusText(status: number): string {
+  return STATUS_TEXTS[String(status)] || 'Unknown';
+}
+
+export function singleHeader(name: string, value: string): HeadersArray {
   return [{ name, value }];
 }
 
-export function mergeHeaders(headers: (types.HeadersArray | undefined | null)[]): types.HeadersArray {
+export function mergeHeaders(headers: (HeadersArray | undefined | null)[]): HeadersArray {
   const lowerCaseToValue = new Map<string, string>();
   const lowerCaseToOriginalCase = new Map<string, string>();
   for (const h of headers) {
@@ -612,8 +892,34 @@ export function mergeHeaders(headers: (types.HeadersArray | undefined | null)[])
       lowerCaseToValue.set(lower, value);
     }
   }
-  const result: types.HeadersArray = [];
+  const result: HeadersArray = [];
   for (const [lower, value] of lowerCaseToValue)
     result.push({ name: lowerCaseToOriginalCase.get(lower)!, value });
+  return result;
+}
+
+function headersSize(headers: HeadersArray): number {
+  let result = 0;
+  for (const header of headers)
+    result += header.name.length + header.value.length + 4; // 4 = ': ' + '\r\n'
+  return result;
+}
+
+export function requestHeadersSize(headers: HeadersArray, url: string, method: string): number {
+  let result = 4; // 4 = 2 spaces + 2 line breaks (GET /path \r\n)
+  result += method.length;
+  result += (new URL(url)).pathname.length;
+  result += 8; // httpVersion
+  result += headersSize(headers);
+  return result;
+}
+
+export function responseHeadersSize(headers: HeadersArray, statusText: string): number {
+  let result = 4; // 4 = 2 spaces + 2 line breaks (HTTP/1.1 200 Ok\r\n)
+  result += 8; // httpVersion;
+  result += 3; // statusCode;
+  result += statusText.length;
+  result += headersSize(headers);
+  result += 2; // '\r\n'
   return result;
 }

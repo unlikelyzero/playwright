@@ -17,8 +17,6 @@
 // @ts-check
 
 const path = require('path');
-const fs = require('fs');
-const Documentation = require('./documentation');
 const { parseApi } = require('./api_parser');
 const PROJECT_DIR = path.join(__dirname, '..', '..');
 
@@ -27,9 +25,9 @@ const PROJECT_DIR = path.join(__dirname, '..', '..');
   documentation.setLinkRenderer(item => {
     const { clazz, param, option } = item;
     if (param)
-      return `\`${param}\``;
+      return `\`${param.alias}\``;
     if (option)
-      return `\`${option}\``;
+      return `\`${option.alias}\``;
     if (clazz)
       return `\`${clazz.name}\``;
   });
@@ -39,66 +37,92 @@ const PROJECT_DIR = path.join(__dirname, '..', '..');
 }
 
 /**
- * @param {Documentation} documentation
+ * @param {import('./documentation').Documentation} documentation
  */
 function serialize(documentation) {
   return documentation.classesArray.map(serializeClass);
 }
 
 /**
- * @param {Documentation.Class} clazz
+ * @param {import('./documentation').Class} clazz
  */
 function serializeClass(clazz) {
   const result = { name: clazz.name, spec: clazz.spec };
   if (clazz.extends)
     result.extends = clazz.extends;
-  result.langs = clazz.langs;
-  if (result.langs && result.langs.types) {
-    for (const key in result.langs.types)
-      result.langs.types[key] = serializeType(result.langs.types[key]);
-  }
+  serializeLangs(clazz, result);
   if (clazz.comment)
     result.comment = clazz.comment;
+  if (clazz.since)
+    result.since = clazz.since;
   result.members = clazz.membersArray.map(serializeMember);
   return result;
 }
 
 /**
- * @param {Documentation.Member} member
+ * @param {import('./documentation').Member} member
  */
 function serializeMember(member) {
   const result = /** @type {any} */ ({ ...member });
   sanitize(result);
   result.args = member.argsArray.map(serializeProperty);
   if (member.type)
-    result.type = serializeType(member.type)
+    result.type = serializeType(member.type);
+  serializeLangs(member, result);
   return result;
 }
 
+/**
+ * @param {import('./documentation').Member | import('./documentation').Class} from
+ * @param {any} to
+ */
+function serializeLangs(from, to) {
+  if (!from.langs)
+    return;
+  to.langs = { ...from.langs };
+  sanitize(to.langs);
+  if (from.langs.overrides) {
+    for (const key in from.langs.overrides)
+      to.langs.overrides[key] = serializeMember(from.langs.overrides[key]);
+  }
+  if (from.langs.types) {
+    for (const key in from.langs.types)
+      to.langs.types[key] = serializeType(from.langs.types[key]);
+  }
+}
+
+/**
+ * @param {import('./documentation').Member} arg
+ */
 function serializeProperty(arg) {
   const result = { ...arg };
   sanitize(result);
   if (arg.type)
-    result.type = serializeType(arg.type, arg.name === 'options')
+    result.type = serializeType(arg.type);
+  serializeLangs(arg, result);
   return result;
 }
 
+/**
+ * @param {object} result
+ */
 function sanitize(result) {
   delete result.args;
   delete result.argsArray;
   delete result.clazz;
   delete result.enclosingMethod;
+  delete result.parent;
 }
 
 /**
- * @param {Documentation.Type} type
- * @param {boolean} sortProperties
+ * @param {import('./documentation').Type} type
  */
-function serializeType(type, sortProperties = false) {
+function serializeType(type) {
   /** @type {any} */
   const result = { ...type };
+  sanitize(result);
   if (type.properties)
-    result.properties = (sortProperties ? type.sortedProperties() : type.properties).map(serializeProperty);
+    result.properties = type.properties.map(serializeProperty);
   if (type.union)
     result.union = type.union.map(type => serializeType(type));
   if (type.templates)

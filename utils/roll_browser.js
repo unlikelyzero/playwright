@@ -17,23 +17,30 @@
  */
 
 const path = require('path');
-const {Registry} = require('../packages/playwright-core/lib/utils/registry');
+const { Registry } = require('../packages/playwright-core/lib/coreBundle').registry;
 const fs = require('fs');
 const protocolGenerator = require('./protocol-types-generator');
-const {execSync} = require('child_process');
+const {execSync, execFileSync} = require('child_process');
+const playwright = require('playwright-core');
 
 const SCRIPT_NAME = path.basename(__filename);
 const CORE_PATH = path.resolve(path.join(__dirname, '..', 'packages', 'playwright-core'));
 
 function usage() {
   return `
-usage: ${SCRIPT_NAME} <browser> <revision>
+usage: ${SCRIPT_NAME} <browser> <revision> [version]
 
 Roll the <browser> to a specific <revision> and generate new protocol.
-Supported browsers: chromium, firefox, webkit, ffmpeg, firefox-beta.
+Version is required for chromium-based browsers.
+Supported browsers: chromium, firefox, webkit, ffmpeg.
+
+Rolling firefox requires a playwright-browsers checkout
+next to the playwright checkout, to roll browser patches from upstream.
+Set PW_BROWSERS_CHECKOUT to point to a checkout in a custom location.
 
 Example:
-  ${SCRIPT_NAME} chromium 123456
+  ${SCRIPT_NAME} chromium 123456 123.0.1234.56
+  ${SCRIPT_NAME} webkit 123456
 `;
 }
 
@@ -53,41 +60,95 @@ Example:
     process.exit(1);
   }
   const browsersJSON = require(path.join(CORE_PATH, 'browsers.json'));
-  const browserName = args[0].toLowerCase();
-  const descriptor = browsersJSON.browsers.find(b => b.name === browserName);
-  if (!descriptor) {
+  const browserName = {
+    'cr': 'chromium',
+    'ff': 'firefox',
+    'wk': 'webkit',
+  }[args[0].toLowerCase()] ?? args[0].toLowerCase();
+  const browserTypeName = browserName.split('-')[0];
+  const descriptors = browsersJSON.browsers.filter(b =>
+    b.name === browserName || b.name === `${browserName}-headless-shell`
+  );
+
+  if (!descriptors.length) {
     console.log(`Unknown browser "${browserName}"`);
     console.log(`Try running ${SCRIPT_NAME} --help`);
     process.exit(1);
   }
-  const revision = args[1];
-  console.log(`Rolling ${browserName} to ${revision}`);
 
-  // 2. Update browsers.json.
-  console.log('\nUpdating browsers.json...');
-  descriptor.revision = String(revision);
-  if (browserName === 'chromium')
-    browsersJSON.browsers.find(b => b.name === 'chromium-with-symbols').revision = String(revision);
+  const revision = args[1];
+  let browserVersion = args[2];
+  console.log(`Rolling ${browserName} to ${revision}`);
+  if (browserVersion) {
+    console.log(`Browser version: ${browserVersion}`);
+  } else if (browserTypeName === 'chromium') {
+    console.log(`Chromium-based browsers must provide a version`);
+    process.exit(1);
+  }
+
+  // 2. Rolling Firefox requires a playwright-browsers checkout to roll browser patches from.
+  const browsersCheckoutPath = process.env.PW_BROWSERS_CHECKOUT || path.resolve(__dirname, '..', '..', 'playwright-browsers');
+  if (browserTypeName === 'firefox' && !fs.existsSync(path.join(browsersCheckoutPath, 'browser_patches', 'build_flavors.sh'))) {
+    console.log(`Rolling ${browserName} requires a playwright-browsers checkout at "${browsersCheckoutPath}".`);
+    console.log(`Use PW_BROWSERS_CHECKOUT to point to a custom location.`);
+    process.exit(1);
+  }
+
+  // 3. Update browser revisions in browsers.json.
+  console.log('\nUpdating revision in browsers.json...');
+  for (const descriptor of descriptors) {
+    descriptor.revision = String(revision);
+    if (browserVersion)
+      descriptor.browserVersion = browserVersion;
+  }
   fs.writeFileSync(path.join(CORE_PATH, 'browsers.json'), JSON.stringify(browsersJSON, null, 2) + '\n');
 
-  if (descriptor.installByDefault) {
-    // 3. Download new browser.
-    console.log('\nDownloading new browser...');
-    const registry = new Registry(browsersJSON);
-    const executables = registry.defaultExecutables();
-    await registry.install(executables);
+  // 4. Download new browser.
+  console.log('\nDownloading new browser...');
+  const registry = new Registry(browsersJSON);
+  const executable = registry.findExecutable(browserName);
+  await registry.installDeps([executable]);
+  await registry.install([...registry.defaultExecutables(), executable]);
 
-    // 4. Generate types.
+  // 5. Update browser version if rolling WebKit / Firefox, validate if rolling Chromium.
+  const browserType = playwright[browserTypeName];
+  if (browserType) {
+    const browser = await browserType.launch({
+      executablePath: executable.executablePath('javascript'),
+    });
+    const downloadedVersion = await browser.version();
+    await browser.close();
+
+    if (browserVersion && downloadedVersion !== browserVersion) {
+      console.error(`\nError: Provided browser version "${browserVersion}" does not match downloaded version "${downloadedVersion}".`);
+      console.error(`Please verify that revision ${revision} corresponds to version ${browserVersion}.`);
+      process.exit(1);
+    }
+
+    if (!browserVersion) {
+      console.log('\nUpdating browser version in browsers.json...');
+      for (const descriptor of descriptors)
+        descriptor.browserVersion = downloadedVersion;
+      fs.writeFileSync(path.join(CORE_PATH, 'browsers.json'), JSON.stringify(browsersJSON, null, 2) + '\n');
+    }
+  }
+
+  // 6. Roll firefox browser patches from the playwright-browsers checkout.
+  if (browserTypeName === 'firefox') {
+    console.log('\nRolling firefox browser patches from the playwright-browsers checkout...');
+    const rollScript = path.join(__dirname, '..', 'browser_patches', 'roll_from_upstream.sh');
+    execFileSync(rollScript, [browsersCheckoutPath, 'firefox'], { stdio: 'inherit' });
+  }
+
+  if (browserType && descriptors[0].installByDefault) {
+    // 7. Generate types.
     console.log('\nGenerating protocol types...');
     const executablePath = registry.findExecutable(browserName).executablePathOrDie();
-    await protocolGenerator.generateProtocol(browserName, executablePath).catch(console.warn);
+    await protocolGenerator.generateProtocol(browserName, executablePath);
 
-    // 5. Update docs.
+    // 8. Update docs.
     console.log('\nUpdating documentation...');
-    try {
-      process.stdout.write(execSync('npm run --silent doc'));
-    } catch (e) {
-    }
+    execSync('npm run doc -- --allow-dirty', { stdio: 'inherit' });
   }
   console.log(`\nRolled ${browserName} to ${revision}`);
 })().catch(err => {

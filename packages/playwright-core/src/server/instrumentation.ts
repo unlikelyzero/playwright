@@ -15,70 +15,146 @@
  */
 
 import { EventEmitter } from 'events';
-import { createGuid } from '../utils/utils';
+
+import { createGuid } from '@utils/crypto';
+import { debugLogger } from '@utils/debugLogger';
+
+import type { SerializedError } from './channels';
 import type { Browser } from './browser';
 import type { BrowserContext } from './browserContext';
 import type { BrowserType } from './browserType';
-import type { ElementHandle } from './dom';
+import type { Dialog } from './dialog';
+import type { Download } from './download';
+import type { APIRequestContext } from './fetch';
 import type { Frame } from './frames';
-import type { Page } from './page';
+import type { Page, Worker } from './page';
+import type { Playwright } from './playwright';
+import type * as types from './types';
+import type { LogName } from '@utils/debugLogger';
 
 export type Attribution = {
-  isInternal: boolean,
+  playwright: Playwright;
   browserType?: BrowserType;
   browser?: Browser;
-  context?: BrowserContext;
+  context?: BrowserContext | APIRequestContext;
   page?: Page;
   frame?: Frame;
+  worker?: Worker;
 };
 
-import { CallMetadata } from '../protocol/callMetadata';
-export { CallMetadata } from '../protocol/callMetadata';
 
-export class SdkObject extends EventEmitter {
+export type EventMap = Record<string | symbol, any[]>;
+
+export class SdkObject<EM extends EventMap = EventMap> extends EventEmitter<EM> {
   guid: string;
   attribution: Attribution;
   instrumentation: Instrumentation;
+  logName?: LogName;
 
-  protected constructor(parent: SdkObject, guidPrefix?: string, guid?: string) {
+  constructor(parent: SdkObject, guidPrefix?: string, guid?: string) {
     super();
     this.guid = guid || `${guidPrefix || ''}@${createGuid()}`;
     this.setMaxListeners(0);
     this.attribution = { ...parent.attribution };
     this.instrumentation = parent.instrumentation;
   }
+
+  apiLog(message: string) {
+    if (!this.attribution.playwright.options.isInternalPlaywright)
+      debugLogger.log('api', message);
+  }
+
+  closeReason(): string | undefined {
+    return this.attribution.worker?._closeReason ||
+      this.attribution.page?._closeReason ||
+      this.attribution.context?._closeReason ||
+      this.attribution.browser?._closeReason;
+  }
 }
 
+export function createRootSdkObject() {
+  const fakeParent = { attribution: {}, instrumentation: createInstrumentation() };
+  const root = new SdkObject(fakeParent as any);
+  root.guid = '';
+  return root;
+}
+
+export type AddListenerOptions = { order?: 'last' };
+
+export type CallMetadata = {
+  id: string;
+  startTime: number;
+  endTime: number;
+  pauseStartTime?: number;
+  pauseEndTime?: number;
+  type: string;
+  method: string;
+  params: any;
+  timeout?: number;
+  title?: string;
+  // Client is making an internal call that should not show up in
+  // the inspector or trace.
+  internal?: boolean;
+  // Test runner step id.
+  stepId?: string;
+  location?: { file: string, line?: number, column?: number };
+  log: string[];
+  error?: SerializedError;
+  result?: any;
+  objectId?: string;
+  pageId?: string;
+  frameId?: string;
+};
+
 export interface Instrumentation {
-  addListener(listener: InstrumentationListener, context: BrowserContext | null): void;
+  addListener(listener: InstrumentationListener, context: BrowserContext | APIRequestContext | null, options?: AddListenerOptions): void;
   removeListener(listener: InstrumentationListener): void;
-  onBeforeCall(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
-  onBeforeInputAction(sdkObject: SdkObject, metadata: CallMetadata, element: ElementHandle): Promise<void>;
+  onBeforeCall(sdkObject: SdkObject, metadata: CallMetadata, parentId?: string): Promise<void>;
+  onBeforeInputAction(sdkObject: SdkObject, metadata: CallMetadata, point?: types.Point, box?: types.Rect): Promise<void>;
   onCallLog(sdkObject: SdkObject, metadata: CallMetadata, logName: string, message: string): void;
   onAfterCall(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
-  onEvent(sdkObject: SdkObject, metadata: CallMetadata): void;
   onPageOpen(page: Page): void;
   onPageClose(page: Page): void;
+  onBrowserOpen(browser: Browser): void;
+  onBrowserClose(browser: Browser): void;
+  onDialog(dialog: Dialog): void;
+  onDownload(page: Page, download: Download): void;
 }
 
 export interface InstrumentationListener {
-  onBeforeCall?(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
-  onBeforeInputAction?(sdkObject: SdkObject, metadata: CallMetadata, element: ElementHandle): Promise<void>;
+  onBeforeCall?(sdkObject: SdkObject, metadata: CallMetadata, parentId?: string): Promise<void>;
+  onBeforeInputAction?(sdkObject: SdkObject, metadata: CallMetadata, point?: types.Point, box?: types.Rect): Promise<void>;
   onCallLog?(sdkObject: SdkObject, metadata: CallMetadata, logName: string, message: string): void;
   onAfterCall?(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
-  onEvent?(sdkObject: SdkObject, metadata: CallMetadata): void;
   onPageOpen?(page: Page): void;
   onPageClose?(page: Page): void;
+  onBrowserOpen?(browser: Browser): void;
+  onBrowserClose?(browser: Browser): void;
+  onDialog?(dialog: Dialog): void;
+  onDownload?(page: Page, download: Download): void;
 }
 
 export function createInstrumentation(): Instrumentation {
-  const listeners = new Map<InstrumentationListener, BrowserContext | null>();
+  const listeners = new Map<InstrumentationListener, BrowserContext | APIRequestContext | null>();
+  const lastListeners = new Map<InstrumentationListener, BrowserContext | APIRequestContext | null>();
   return new Proxy({}, {
-    get: (obj: any, prop: string) => {
-      if (prop === 'addListener')
-        return (listener: InstrumentationListener, context: BrowserContext | null) => listeners.set(listener, context);
-      if (prop === 'removeListener')
-        return (listener: InstrumentationListener) => listeners.delete(listener);
+    get: (obj: any, prop: string | symbol) => {
+      if (typeof prop !== 'string')
+        return obj[prop];
+      if (prop === 'addListener') {
+        return (listener: InstrumentationListener, context: BrowserContext | APIRequestContext | null, options?: AddListenerOptions) => {
+          if (options?.order === 'last')
+            lastListeners.set(listener, context);
+          else
+            listeners.set(listener, context);
+        };
+      }
+      if (prop === 'removeListener') {
+        return (listener: InstrumentationListener) => {
+          listeners.delete(listener);
+          lastListeners.delete(listener);
+        };
+      }
       if (!prop.startsWith('on'))
         return obj[prop];
       return async (sdkObject: SdkObject, ...params: any[]) => {
@@ -86,21 +162,11 @@ export function createInstrumentation(): Instrumentation {
           if (!context || sdkObject.attribution.context === context)
             await (listener as any)[prop]?.(sdkObject, ...params);
         }
+        for (const [listener, context] of lastListeners) {
+          if (!context || sdkObject.attribution.context === context)
+            await (listener as any)[prop]?.(sdkObject, ...params);
+        }
       };
     },
   });
-}
-
-export function internalCallMetadata(): CallMetadata {
-  return {
-    id: '',
-    wallTime: 0,
-    startTime: 0,
-    endTime: 0,
-    type: 'Internal',
-    method: '',
-    params: {},
-    log: [],
-    snapshots: []
-  };
 }

@@ -14,38 +14,64 @@
   limitations under the License.
 */
 
-import type { TestCaseSummary } from '@playwright/test/src/reporters/html';
+import type { TestCaseSummary } from './types';
+
+type FilterToken = {
+  name: string;
+  not: boolean;
+};
 
 export class Filter {
-  project: string[] = [];
-  status: string[] = [];
-  text: string[] = [];
+  project: FilterToken[] = [];
+  status: FilterToken[] = [];
+  text: FilterToken[] = [];
+  labels: FilterToken[] = [];
+  annotations: FilterToken[] = [];
 
   empty(): boolean {
-    return this.project.length + this.status.length + this.text.length === 0;
+    return (
+      this.project.length + this.status.length + this.text.length +
+      this.labels.length + this.annotations.length
+    ) === 0;
   }
 
   static parse(expression: string): Filter {
     const tokens = Filter.tokenize(expression);
-    const project = new Set<string>();
-    const status = new Set<string>();
-    const text: string[] = [];
-    for (const token of tokens) {
+    const project = new Set<FilterToken>();
+    const status = new Set<FilterToken>();
+    const text: FilterToken[] = [];
+    const labels = new Set<FilterToken>();
+    const annotations = new Set<FilterToken>();
+    for (let token of tokens) {
+      const not = token.startsWith('!');
+      if (not)
+        token = token.slice(1);
+
       if (token.startsWith('p:')) {
-        project.add(token.slice(2));
+        project.add({ name: token.slice(2), not });
         continue;
       }
       if (token.startsWith('s:')) {
-        status.add(token.slice(2));
+        status.add({ name: token.slice(2), not });
         continue;
       }
-      text.push(token.toLowerCase());
+      if (token.startsWith('@')) {
+        labels.add({ name: token, not });
+        continue;
+      }
+      if (token.startsWith('annot:')) {
+        annotations.add({ name: token.slice('annot:'.length), not });
+        continue;
+      }
+      text.push({ name: token.toLowerCase(), not });
     }
 
     const filter = new Filter();
     filter.text = text;
     filter.project = [...project];
     filter.status = [...status];
+    filter.labels = [...labels];
+    filter.annotations = [...annotations];
     return filter;
   }
 
@@ -91,40 +117,56 @@ export class Filter {
   }
 
   matches(test: TestCaseSummary): boolean {
-    if (!(test as any).searchValues) {
-      let status = 'passed';
-      if (test.outcome === 'unexpected')
-        status = 'failed';
-      if (test.outcome === 'flaky')
-        status = 'flaky';
-      if (test.outcome === 'skipped')
-        status = 'skipped';
-      const searchValues: SearchValues = {
-        text: (status + ' ' + test.projectName + ' ' + test.path.join(' ') + test.title).toLowerCase(),
-        project: test.projectName.toLowerCase(),
-        status: status as any
-      };
-      (test as any).searchValues = searchValues;
-    }
-
-    const searchValues = (test as any).searchValues as SearchValues;
+    const searchValues = cacheSearchValues(test);
     if (this.project.length) {
-      const matches = !!this.project.find(p => searchValues.project.includes(p));
+      const matches = !!this.project.find(p => {
+        const match = searchValues.project.includes(p.name);
+        return p.not ? !match : match;
+      });
       if (!matches)
         return false;
     }
     if (this.status.length) {
-      const matches = !!this.status.find(s => searchValues.status.includes(s));
+      const matches = !!this.status.find(s => {
+        const match = searchValues.status.includes(s.name);
+        return s.not ? !match : match;
+      });
       if (!matches)
         return false;
+    } else {
+      if (searchValues.status === 'skipped')
+        return false;
     }
-
     if (this.text.length) {
-      const matches = this.text.filter(t => searchValues.text.includes(t)).length === this.text.length;
+      const matches = this.text.every(text => {
+        if (searchValues.text.includes(text.name))
+          return text.not ? false : true;
+
+        const [fileName, line, column] = text.name.split(':');
+        if (searchValues.file.includes(fileName) && searchValues.line === line && (column === undefined || searchValues.column === column))
+          return text.not ? false : true;
+
+        return text.not ? true : false;
+      });
       if (!matches)
         return false;
     }
-
+    if (this.labels.length) {
+      const matches = this.labels.every(l => {
+        const match = searchValues.labels.includes(l.name);
+        return l.not ? !match : match;
+      });
+      if (!matches)
+        return false;
+    }
+    if (this.annotations.length) {
+      const matches = this.annotations.every(annotation => {
+        const match = searchValues.annotations.some(a => a.includes(annotation.name));
+        return annotation.not ? !match : match;
+      });
+      if (!matches)
+        return false;
+    }
     return true;
   }
 }
@@ -133,5 +175,72 @@ type SearchValues = {
   text: string;
   project: string;
   status: 'passed' | 'failed' | 'flaky' | 'skipped';
+  file: string;
+  line: string;
+  column: string;
+  labels: string[];
+  annotations: string[];
 };
 
+const searchValuesSymbol = Symbol('searchValues');
+
+function cacheSearchValues(test: TestCaseSummary & { [searchValuesSymbol]?: SearchValues }): SearchValues {
+  const cached = test[searchValuesSymbol];
+  if (cached)
+    return cached;
+
+  let status: SearchValues['status'] = 'passed';
+  if (test.outcome === 'unexpected')
+    status = 'failed';
+  if (test.outcome === 'flaky')
+    status = 'flaky';
+  if (test.outcome === 'skipped')
+    status = 'skipped';
+  const searchValues: SearchValues = {
+    text: (status + ' ' + test.projectName + ' ' + test.tags.join(' ') + ' ' + test.location.file + ' ' + test.path.join(' ') + ' ' + test.title).toLowerCase(),
+    project: test.projectName.toLowerCase(),
+    status,
+    file: test.location.file,
+    line: String(test.location.line),
+    column: String(test.location.column),
+    labels: test.tags.map(tag => tag.toLowerCase()),
+    annotations: test.annotations.map(a => a.type.toLowerCase() + '=' + (a.description ?? '').toLowerCase())
+  };
+  test[searchValuesSymbol] = searchValues;
+  return searchValues;
+}
+
+// Extract quoted groups of search params, or tokens separated by whitespace
+const SEARCH_PARAM_GROUP_REGEX = /("[^"]*"|"[^"]*$|\S+)/g;
+
+export function filterWithQuery(searchParams: URLSearchParams, token: string, append: boolean): string {
+  const result = new URLSearchParams(searchParams);
+  const existingQuery = searchParams.get('q') ?? '';
+  const tokens = [...existingQuery.matchAll(SEARCH_PARAM_GROUP_REGEX)].map(m => {
+    const rawValue = m[0];
+    return rawValue.startsWith('"') && rawValue.endsWith('"') && rawValue.length > 1 ? rawValue.slice(1, rawValue.length - 1) : rawValue;
+  });
+  if (append) {
+    result.set('q', joinTokens(!tokens.includes(token) ? [...tokens, token] : tokens.filter(t => t !== token)));
+    return '#?' + result;
+  }
+
+  // if metaKey or ctrlKey is not pressed, replace existing token with new token
+  let prefix: 's:' | 'p:' | '@';
+  if (token.startsWith('s:'))
+    prefix = 's:';
+  if (token.startsWith('p:'))
+    prefix = 'p:';
+  if (token.startsWith('@'))
+    prefix = '@';
+
+  const newTokens = tokens.filter(t => !t.startsWith(prefix));
+  newTokens.push(token);
+
+  result.set('q', joinTokens(newTokens));
+  return '#?' + result;
+}
+
+function joinTokens(tokens: string[]): string {
+  return tokens.map(token => /\s/.test(token) ? `"${token}"` : token).join(' ').trim();
+}

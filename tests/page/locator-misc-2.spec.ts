@@ -17,7 +17,7 @@
 
 import { test as it, expect } from './pageTest';
 
-it('should press #smoke', async ({ page }) => {
+it('should press @smoke', async ({ page }) => {
   await page.setContent(`<input type='text' />`);
   await page.locator('input').press('h');
   expect(await page.$eval('input', input => input.value)).toBe('h');
@@ -42,17 +42,43 @@ it('should scroll into view', async ({ page, server, isAndroid }) => {
   }
 });
 
+it('should scroll zero-sized element into view', async ({ page, isAndroid, isElectron }) => {
+  it.fixme(isAndroid || isElectron);
+
+  await page.setContent(`
+    <style>
+      html,body { margin: 0; padding: 0; }
+      ::-webkit-scrollbar { display: none; }
+      * { scrollbar-width: none; }
+    </style>
+    <div style="height: 2000px; text-align: center; border: 10px solid blue;">
+      <h1>SCROLL DOWN</h1>
+    </div>
+    <div id=lazyload style="font-size:75px; background-color: green;"></div>
+    <script>
+      const lazyLoadElement = document.querySelector('#lazyload');
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some(entry => entry.isIntersecting)) {
+          lazyLoadElement.textContent = 'LAZY LOADED CONTENT';
+          lazyLoadElement.style.height = '20px';
+          observer.disconnect();
+        }
+      });
+      observer.observe(lazyLoadElement);
+    </script>
+  `);
+  expect(await page.locator('#lazyload').boundingBox()).toEqual({ x: 0, y: 2020, width: 1280, height: 0 });
+  await page.locator('#lazyload').scrollIntoViewIfNeeded();
+  await expect(page.locator('#lazyload')).toHaveText('LAZY LOADED CONTENT');
+  expect(await page.locator('#lazyload').boundingBox()).toEqual({ x: 0, y: 720, width: 1280, height: 20 });
+});
+
 it('should select textarea', async ({ page, server, browserName }) => {
   await page.goto(server.PREFIX + '/input/textarea.html');
   const textarea = page.locator('textarea');
   await textarea.evaluate(textarea => (textarea as HTMLTextAreaElement).value = 'some value');
   await textarea.selectText();
-  if (browserName === 'firefox') {
-    expect(await textarea.evaluate(el => (el as HTMLTextAreaElement).selectionStart)).toBe(0);
-    expect(await textarea.evaluate(el => (el as HTMLTextAreaElement).selectionEnd)).toBe(10);
-  } else {
-    expect(await page.evaluate(() => window.getSelection().toString())).toBe('some value');
-  }
+  expect(await page.evaluate(() => window.getSelection().toString())).toBe('some value');
 });
 
 it('should type', async ({ page }) => {
@@ -61,7 +87,13 @@ it('should type', async ({ page }) => {
   expect(await page.$eval('input', input => input.value)).toBe('hello');
 });
 
-it('should take screenshot', async ({ page, server, browserName, headless, isAndroid }) => {
+it('should pressSequentially', async ({ page }) => {
+  await page.setContent(`<input type='text' />`);
+  await page.locator('input').pressSequentially('hello');
+  expect(await page.$eval('input', input => input.value)).toBe('hello');
+});
+
+it('should take screenshot', async ({ page, server, browserName, headless, isAndroid, mode }) => {
   it.skip(browserName === 'firefox' && !headless);
   it.skip(isAndroid, 'Different dpr. Remove after using 1x scale for screenshots.');
   await page.setViewportSize({ width: 500, height: 500 });
@@ -72,8 +104,7 @@ it('should take screenshot', async ({ page, server, browserName, headless, isAnd
   expect(screenshot).toMatchSnapshot('screenshot-element-bounding-box.png');
 });
 
-it('should return bounding box', async ({ page, server, browserName, headless, isAndroid }) => {
-  it.fail(browserName === 'firefox' && !headless);
+it('should return bounding box', async ({ page, server, browserName, headless, isAndroid, isLinux }) => {
   it.skip(isAndroid);
 
   await page.setViewportSize({ width: 500, height: 500 });
@@ -114,9 +145,67 @@ it('should combine visible with other selectors', async ({ page }) => {
   await expect(page.locator('.item >> visible=true >> text=data3')).toHaveText('visible data3');
 });
 
+it('should support filter(visible)', async ({ page }) => {
+  await page.setContent(`<div>
+    <div class="item" style="display: none">Hidden data0</div>
+    <div class="item">visible data1</div>
+    <div class="item" style="display: none">Hidden data1</div>
+    <div class="item">visible data2</div>
+    <div class="item" style="display: none">Hidden data2</div>
+    <div class="item">visible data3</div>
+    </div>
+  `);
+  const locator = page.locator('.item').filter({ visible: true }).nth(1);
+  await expect(locator).toHaveText('visible data2');
+  await expect(page.locator('.item').filter({ visible: true }).getByText('data3')).toHaveText('visible data3');
+  await expect(page.locator('.item').filter({ visible: false }).getByText('data1')).toHaveText('Hidden data1');
+});
+
 it('locator.count should work with deleted Map in main world', async ({ page }) => {
   it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/11254' });
   await page.evaluate('Map = 1');
   await page.locator('#searchResultTableDiv .x-grid3-row').count();
   await expect(page.locator('#searchResultTableDiv .x-grid3-row')).toHaveCount(0);
+});
+
+it('Locator.locator() and FrameLocator.locator() should accept locator', async ({ page }) => {
+  await page.setContent(`
+    <div><input value=outer></div>
+    <iframe srcdoc="<div><input value=inner></div>"></iframe>
+  `);
+
+  const inputLocator = page.locator('input');
+  expect(await inputLocator.inputValue()).toBe('outer');
+  expect(await page.locator('div').locator(inputLocator).inputValue()).toBe('outer');
+  expect(await page.frameLocator('iframe').locator(inputLocator).inputValue()).toBe('inner');
+  expect(await page.frameLocator('iframe').locator('div').locator(inputLocator).inputValue()).toBe('inner');
+
+  const divLocator = page.locator('div');
+  expect(await divLocator.locator('input').inputValue()).toBe('outer');
+  expect(await page.frameLocator('iframe').locator(divLocator).locator('input').inputValue()).toBe('inner');
+});
+
+it('should fill programmatically enabled textarea', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/36307' } }, async ({ page }) => {
+  await page.setContent(`
+    <button>Enable</button>
+    <form>
+      <textarea id="text" disabled></textarea>
+    </form>
+    <script>
+      document.querySelector('button').addEventListener('click', () => {
+        document.querySelector('#text').disabled = false;
+      });
+    </script>
+  `);
+  await page.locator('button').click();
+  await page.locator('#text').fill('Hello');
+  await expect(page.locator('#text')).toHaveValue('Hello');
+});
+
+it('press should throw on unknown keys', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/36697' } }, async ({ page, server }) => {
+  await page.setContent(`<input type='text' value='hello' />`);
+  const locator = page.getByRole('textbox');
+  await expect(locator.press('NotARealKey')).rejects.toThrowError(/Unknown key: "NotARealKey"/);
+  await expect(locator.press('ё')).rejects.toThrowError(/Unknown key: "ё"/);
+  await expect(locator.press('😊')).rejects.toThrowError(/Unknown key: "😊"/);
 });

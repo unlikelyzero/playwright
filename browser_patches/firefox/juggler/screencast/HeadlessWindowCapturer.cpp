@@ -4,6 +4,8 @@
 
 #include "HeadlessWindowCapturer.h"
 
+#include <bit>
+
 #include "api/video/i420_buffer.h"
 #include "HeadlessWidget.h"
 #include "libyuv.h"
@@ -18,8 +20,10 @@ using namespace webrtc;
 
 namespace mozilla {
 
-rtc::scoped_refptr<webrtc::VideoCaptureModuleEx> HeadlessWindowCapturer::Create(HeadlessWidget* headlessWindow) {
-  return new rtc::RefCountedObject<HeadlessWindowCapturer>(headlessWindow);
+webrtc::scoped_refptr<webrtc::VideoCaptureModuleEx> HeadlessWindowCapturer::Create(HeadlessWidget* headlessWindow) {
+  return webrtc::scoped_refptr<webrtc::VideoCaptureModuleEx>(
+    new webrtc::RefCountedObject<HeadlessWindowCapturer>(headlessWindow)
+  );
 }
 
 HeadlessWindowCapturer::HeadlessWindowCapturer(mozilla::widget::HeadlessWidget* window)
@@ -30,25 +34,26 @@ HeadlessWindowCapturer::~HeadlessWindowCapturer() {
 }
 
 
-void HeadlessWindowCapturer::RegisterCaptureDataCallback(rtc::VideoSinkInterface<webrtc::VideoFrame>* dataCallback) {
-  rtc::CritScope lock2(&_callBackCs);
+void HeadlessWindowCapturer::RegisterCaptureDataCallback(webrtc::VideoSinkInterface<webrtc::VideoFrame>* dataCallback) {
+  webrtc::CritScope lock2(&_callBackCs);
   _dataCallBacks.insert(dataCallback);
 }
-void HeadlessWindowCapturer::DeRegisterCaptureDataCallback(rtc::VideoSinkInterface<webrtc::VideoFrame>* dataCallback) {
-  rtc::CritScope lock2(&_callBackCs);
-  auto it = _dataCallBacks.find(dataCallback);
-  if (it != _dataCallBacks.end()) {
-    _dataCallBacks.erase(it);
-  }
+
+void HeadlessWindowCapturer::RegisterCaptureDataCallback(webrtc::RawVideoSinkInterface* dataCallback) {
+}
+
+void HeadlessWindowCapturer::DeRegisterCaptureDataCallback() {
+  webrtc::CritScope lock2(&_callBackCs);
+  _dataCallBacks.clear();
 }
 
 void HeadlessWindowCapturer::RegisterRawFrameCallback(webrtc::RawFrameCallback* rawFrameCallback) {
-  rtc::CritScope lock2(&_callBackCs);
+  webrtc::CritScope lock2(&_callBackCs);
   _rawFrameCallbacks.insert(rawFrameCallback);
 }
 
 void HeadlessWindowCapturer::DeRegisterRawFrameCallback(webrtc::RawFrameCallback* rawFrameCallback) {
-  rtc::CritScope lock2(&_callBackCs);
+  webrtc::CritScope lock2(&_callBackCs);
   auto it = _rawFrameCallbacks.find(rawFrameCallback);
   if (it != _rawFrameCallbacks.end()) {
     _rawFrameCallbacks.erase(it);
@@ -56,20 +61,12 @@ void HeadlessWindowCapturer::DeRegisterRawFrameCallback(webrtc::RawFrameCallback
 }
 
 void HeadlessWindowCapturer::NotifyFrameCaptured(const webrtc::VideoFrame& frame) {
-  rtc::CritScope lock2(&_callBackCs);
+  webrtc::CritScope lock2(&_callBackCs);
   for (auto dataCallBack : _dataCallBacks)
     dataCallBack->OnFrame(frame);
 }
 
-int32_t HeadlessWindowCapturer::StopCaptureIfAllClientsClose() {
-  if (_dataCallBacks.empty()) {
-    return StopCapture();
-  } else {
-    return 0;
-  }
-}
-
-int32_t HeadlessWindowCapturer::StartCapture(const VideoCaptureCapability& capability) {
+int32_t HeadlessWindowCapturer::StartCapture(const webrtc::VideoCaptureCapability& capability) {
   mWindow->SetSnapshotListener([this] (RefPtr<gfx::DataSourceSurface>&& dataSurface){
     if (!NS_IsInCompositorThread()) {
       fprintf(stderr, "SnapshotListener is called not on the Compositor thread!\n");
@@ -84,14 +81,14 @@ int32_t HeadlessWindowCapturer::StartCapture(const VideoCaptureCapability& capab
     webrtc::VideoCaptureCapability frameInfo;
     frameInfo.width = dataSurface->GetSize().width;
     frameInfo.height = dataSurface->GetSize().height;
-#if MOZ_LITTLE_ENDIAN()
-    frameInfo.videoType = VideoType::kARGB;
-#else
-    frameInfo.videoType = VideoType::kBGRA;
-#endif
+    if constexpr (std::endian::native == std::endian::little) {
+      frameInfo.videoType = VideoType::kARGB;
+    } else {
+      frameInfo.videoType = VideoType::kBGRA;
+    }
 
     {
-      rtc::CritScope lock2(&_callBackCs);
+      webrtc::CritScope lock2(&_callBackCs);
       for (auto rawFrameCallback : _rawFrameCallbacks) {
         rawFrameCallback->OnRawFrame(dataSurface->GetData(), dataSurface->Stride(), frameInfo);
       }
@@ -101,7 +98,7 @@ int32_t HeadlessWindowCapturer::StartCapture(const VideoCaptureCapability& capab
 
     int width = dataSurface->GetSize().width;
     int height = dataSurface->GetSize().height;
-    rtc::scoped_refptr<I420Buffer> buffer = I420Buffer::Create(width, height);
+    webrtc::scoped_refptr<I420Buffer> buffer = I420Buffer::Create(width, height);
 
     gfx::DataSourceSurface::ScopedMap map(dataSurface.get(), gfx::DataSourceSurface::MapType::READ);
     if (!map.IsMapped()) {
@@ -109,22 +106,25 @@ int32_t HeadlessWindowCapturer::StartCapture(const VideoCaptureCapability& capab
       return;
     }
 
-#if MOZ_LITTLE_ENDIAN()
-    const int conversionResult = libyuv::ARGBToI420(
-#else
-    const int conversionResult = libyuv::BGRAToI420(
-#endif
-        map.GetData(), map.GetStride(),
-        buffer->MutableDataY(), buffer->StrideY(),
-        buffer->MutableDataU(), buffer->StrideU(),
-        buffer->MutableDataV(), buffer->StrideV(),
-        width, height);
+    const int conversionResult = std::endian::native == std::endian::little ? libyuv::ARGBToI420(
+      map.GetData(), map.GetStride(),
+      buffer->MutableDataY(), buffer->StrideY(),
+      buffer->MutableDataU(), buffer->StrideU(),
+      buffer->MutableDataV(), buffer->StrideV(),
+      width, height
+    ) : libyuv::BGRAToI420(
+      map.GetData(), map.GetStride(),
+      buffer->MutableDataY(), buffer->StrideY(),
+      buffer->MutableDataU(), buffer->StrideU(),
+      buffer->MutableDataV(), buffer->StrideV(),
+      width, height
+    );
     if (conversionResult != 0) {
       fprintf(stderr, "Failed to convert capture frame to I420: %d\n", conversionResult);
       return;
     }
 
-    VideoFrame captureFrame(buffer, 0, rtc::TimeMillis(), kVideoRotation_0);
+    VideoFrame captureFrame(buffer, 0, webrtc::TimeMillis(), kVideoRotation_0);
     NotifyFrameCaptured(captureFrame);
   });
   return 0;

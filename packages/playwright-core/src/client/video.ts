@@ -14,47 +14,38 @@
  * limitations under the License.
  */
 
-import { Page } from './page';
-import * as api from '../../types/types';
 import { Artifact } from './artifact';
-import { Connection } from './connection';
+import { EventEmitter } from './eventEmitter';
 
-export class Video implements api.Video {
-  private _artifact: Promise<Artifact | null> | null = null;
-  private _artifactCallback = (artifact: Artifact) => {};
+import type { Connection } from './connection';
+import type * as api from '../../types/types';
+
+export class Video extends EventEmitter implements api.Video {
+  private _artifact: Artifact | undefined;
   private _isRemote = false;
 
-  constructor(page: Page, connection: Connection) {
+  constructor(connection: Connection, artifact: Artifact | undefined) {
+    super();
     this._isRemote = connection.isRemote();
-    this._artifact = Promise.race([
-      new Promise<Artifact>(f => this._artifactCallback = f),
-      page._closedOrCrashedPromise.then(() => null),
-    ]);
-  }
-
-  _artifactReady(artifact: Artifact) {
-    this._artifactCallback(artifact);
+    this._artifact = artifact;
   }
 
   async path(): Promise<string> {
     if (this._isRemote)
       throw new Error(`Path is not available when connecting remotely. Use saveAs() to save a local copy.`);
-    const artifact = await this._artifact;
-    if (!artifact)
-      throw new Error('Page did not produce any video frames');
-    return artifact._initializer.absolutePath;
+    if (!this._artifact)
+      throw new Error('Video recording has not been started.');
+    return this._artifact._initializer.absolutePath;
   }
 
   async saveAs(path: string): Promise<void> {
-    const artifact = await this._artifact;
-    if (!artifact)
-      throw new Error('Page did not produce any video frames');
-    return artifact.saveAs(path);
+    if (!this._artifact)
+      throw new Error('Video recording has not been started.');
+    return await this._artifact.saveAs(path);
   }
 
   async delete(): Promise<void> {
-    const artifact = await this._artifact;
-    if (artifact)
-      await artifact.delete();
+    if (this._artifact)
+      await this._artifact.delete();
   }
 }

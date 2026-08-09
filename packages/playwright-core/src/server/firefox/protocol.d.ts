@@ -1,12 +1,16 @@
 // This is generated from /utils/protocol-types-generator/index.js
-export module Protocol {
+export namespace Protocol {
 
-  export module Browser {
+  export namespace Browser {
     export type TargetInfo = {
       type: ("page");
       targetId: string;
       browserContextId?: string;
       openerId?: string;
+    };
+    export type UserPreference = {
+      name: string;
+      value: any;
     };
     export type CookieOptions = {
       name: string;
@@ -57,6 +61,7 @@ export module Protocol {
       uuid: string;
       browserContextId?: string;
       pageTargetId: string;
+      frameId: string;
       url: string;
       suggestedFileName: string;
     }
@@ -65,11 +70,12 @@ export module Protocol {
       canceled?: boolean;
       error?: string;
     }
-    export type videoRecordingFinishedPayload = {
-      screencastId: string;
-    }
     export type enableParameters = {
       attachToDefaultContext: boolean;
+      userPrefs?: {
+        name: string;
+        value: any;
+      }[];
     };
     export type enableReturnValue = void;
     export type createBrowserContextParameters = {
@@ -103,6 +109,8 @@ export module Protocol {
       }[];
     };
     export type setExtraHTTPHeadersReturnValue = void;
+    export type clearCacheParameters = void;
+    export type clearCacheReturnValue = void;
     export type setBrowserProxyParameters = {
       type: ("http"|"https"|"socks"|"socks4");
       bypass: string[];
@@ -127,7 +135,8 @@ export module Protocol {
       credentials: {
         username: string;
         password: string;
-      }|null;
+        origin?: string;
+      }[]|null;
     };
     export type setHTTPCredentialsReturnValue = void;
     export type setRequestInterceptionParameters = {
@@ -135,6 +144,11 @@ export module Protocol {
       enabled: boolean;
     };
     export type setRequestInterceptionReturnValue = void;
+    export type setCacheDisabledParameters = {
+      browserContextId?: string;
+      cacheDisabled: boolean;
+    };
+    export type setCacheDisabledReturnValue = void;
     export type setGeolocationOverrideParameters = {
       browserContextId?: string;
       geolocation: {
@@ -200,19 +214,22 @@ export module Protocol {
           height: number;
         };
         deviceScaleFactor?: number;
+        screenSize?: {
+          width: number;
+          height: number;
+        };
+        isMobile?: boolean;
       }|null;
     };
     export type setDefaultViewportReturnValue = void;
-    export type setScrollbarsHiddenParameters = {
+    export type setInitScriptsParameters = {
       browserContextId?: string;
-      hidden: boolean;
+      scripts: {
+        script: string;
+        worldName?: string;
+      }[];
     };
-    export type setScrollbarsHiddenReturnValue = void;
-    export type addScriptToEvaluateOnNewDocumentParameters = {
-      browserContextId?: string;
-      script: string;
-    };
-    export type addScriptToEvaluateOnNewDocumentReturnValue = void;
+    export type setInitScriptsReturnValue = void;
     export type addBindingParameters = {
       browserContextId?: string;
       worldName?: string;
@@ -286,21 +303,31 @@ export module Protocol {
       forcedColors: ("active"|"none")|null;
     };
     export type setForcedColorsReturnValue = void;
-    export type setVideoRecordingOptionsParameters = {
+    export type setContrastParameters = {
+      browserContextId?: string;
+      contrast: ("less"|"more"|"custom"|"no-preference")|null;
+    };
+    export type setContrastReturnValue = void;
+    export type setScreencastOptionsParameters = {
       browserContextId?: string;
       options?: {
-        dir: string;
         width: number;
         height: number;
+        quality: number;
       };
     };
-    export type setVideoRecordingOptionsReturnValue = void;
+    export type setScreencastOptionsReturnValue = void;
     export type cancelDownloadParameters = {
       uuid?: string;
     };
     export type cancelDownloadReturnValue = void;
   }
-  export module Page {
+  export namespace Heap {
+    export type collectGarbageParameters = {
+    };
+    export type collectGarbageReturnValue = void;
+  }
+  export namespace Page {
     export type DOMPoint = {
       x: number;
       y: number;
@@ -321,6 +348,11 @@ export module Protocol {
         height: number;
       };
       deviceScaleFactor?: number;
+      screenSize?: {
+        width: number;
+        height: number;
+      };
+      isMobile?: boolean;
     };
     export type DOMQuad = {
       p1: {
@@ -354,6 +386,10 @@ export module Protocol {
       width: number;
       height: number;
     };
+    export type InitScript = {
+      script: string;
+      worldName?: string;
+    };
     export type readyPayload = {
     }
     export type crashedPayload = {
@@ -366,6 +402,11 @@ export module Protocol {
       frameId: string;
       message: string;
       stack: string;
+      location: {
+        columnNumber: number;
+        lineNumber: number;
+        url: string;
+      };
     }
     export type frameAttachedPayload = {
       frameId: string;
@@ -377,7 +418,6 @@ export module Protocol {
     export type navigationStartedPayload = {
       frameId: string;
       navigationId: string;
-      url: string;
     }
     export type navigationCommittedPayload = {
       frameId: string;
@@ -435,10 +475,6 @@ export module Protocol {
       workerId: string;
       message: string;
     }
-    export type videoRecordingStartedPayload = {
-      screencastId: string;
-      file: string;
-    }
     export type webSocketCreatedPayload = {
       frameId: string;
       wsid: string;
@@ -460,17 +496,20 @@ export module Protocol {
       wsid: string;
       opcode: number;
       data: string;
+      timestamp: number;
     }
     export type webSocketFrameReceivedPayload = {
       frameId: string;
       wsid: string;
       opcode: number;
       data: string;
+      timestamp: number;
     }
     export type screencastFramePayload = {
       data: string;
       deviceWidth: number;
       deviceHeight: number;
+      timestamp: number;
     }
     export type closeParameters = {
       runBeforeUnload?: boolean;
@@ -493,8 +532,18 @@ export module Protocol {
         width: number;
         height: number;
       }|null;
+      deviceScaleFactor?: number;
+      screenSize?: {
+        width: number;
+        height: number;
+      };
+      isMobile?: boolean;
     };
     export type setViewportSizeReturnValue = void;
+    export type setZoomParameters = {
+      zoom: number;
+    };
+    export type setZoomReturnValue = void;
     export type bringToFrontParameters = {
     };
     export type bringToFrontReturnValue = void;
@@ -503,6 +552,7 @@ export module Protocol {
       colorScheme?: ("dark"|"light"|"no-preference");
       reducedMotion?: ("reduce"|"no-preference");
       forcedColors?: ("active"|"none");
+      contrast?: ("less"|"more"|"custom"|"no-preference");
     };
     export type setEmulatedMediaReturnValue = void;
     export type setCacheDisabledParameters = {
@@ -528,11 +578,13 @@ export module Protocol {
       };
     };
     export type scrollIntoViewIfNeededReturnValue = void;
-    export type addScriptToEvaluateOnNewDocumentParameters = {
-      script: string;
-      worldName?: string;
+    export type setInitScriptsParameters = {
+      scripts: {
+        script: string;
+        worldName?: string;
+      }[];
     };
-    export type addScriptToEvaluateOnNewDocumentReturnValue = void;
+    export type setInitScriptsReturnValue = void;
     export type navigateParameters = {
       frameId: string;
       url: string;
@@ -540,7 +592,6 @@ export module Protocol {
     };
     export type navigateReturnValue = {
       navigationId: string|null;
-      navigationURL: string|null;
     };
     export type goBackParameters = {
       frameId: string;
@@ -554,13 +605,11 @@ export module Protocol {
     export type goForwardReturnValue = {
       success: boolean;
     };
-    export type reloadParameters = {
-      frameId: string;
-    };
+    export type reloadParameters = void;
     export type reloadReturnValue = void;
     export type adoptNodeParameters = {
       frameId: string;
-      objectId: string;
+      objectId?: string;
       executionContextId: string;
     };
     export type adoptNodeReturnValue = {
@@ -573,13 +622,14 @@ export module Protocol {
       }|null;
     };
     export type screenshotParameters = {
-      mimeType: ("image/png"|"image/jpeg");
-      clip?: {
+      mimeType: ("image/png"|"image/jpeg"|"image/webp");
+      clip: {
         x: number;
         y: number;
         width: number;
         height: number;
       };
+      quality?: number;
       omitDeviceScaleFactor?: boolean;
     };
     export type screenshotReturnValue = {
@@ -641,7 +691,7 @@ export module Protocol {
     };
     export type dispatchTapEventReturnValue = void;
     export type dispatchMouseEventParameters = {
-      type: string;
+      type: ("mousedown"|"mousemove"|"mouseup");
       button: number;
       x: number;
       y: number;
@@ -663,8 +713,7 @@ export module Protocol {
       text: string;
     };
     export type insertTextReturnValue = void;
-    export type crashParameters = {
-    };
+    export type crashParameters = void;
     export type crashReturnValue = void;
     export type handleDialogParameters = {
       dialogId: string;
@@ -687,17 +736,13 @@ export module Protocol {
       height: number;
       quality: number;
     };
-    export type startScreencastReturnValue = {
-      screencastId: string;
-    };
-    export type screencastFrameAckParameters = {
-      screencastId: string;
-    };
+    export type startScreencastReturnValue = void;
+    export type screencastFrameAckParameters = void;
     export type screencastFrameAckReturnValue = void;
     export type stopScreencastParameters = void;
     export type stopScreencastReturnValue = void;
   }
-  export module Runtime {
+  export namespace Runtime {
     export type RemoteObject = {
       type?: ("object"|"function"|"undefined"|"string"|"number"|"boolean"|"symbol"|"bigint");
       subtype?: ("array"|"null"|"node"|"regexp"|"date"|"map"|"set"|"weakmap"|"weakset"|"error"|"proxy"|"promise"|"typedarray");
@@ -743,6 +788,8 @@ export module Protocol {
     }
     export type executionContextDestroyedPayload = {
       executionContextId: string;
+    }
+    export type executionContextsClearedPayload = {
     }
     export type consolePayload = {
       executionContextId: string;
@@ -825,7 +872,7 @@ export module Protocol {
       }[];
     };
   }
-  export module Network {
+  export namespace Network {
     export type HTTPHeader = {
       name: string;
       value: string;
@@ -833,6 +880,7 @@ export module Protocol {
     export type HTTPCredentials = {
       username: string;
       password: string;
+      origin?: string;
     };
     export type SecurityDetails = {
       protocol: string;
@@ -895,6 +943,7 @@ export module Protocol {
         requestStart: number;
         responseStart: number;
       };
+      fromServiceWorker: boolean;
     }
     export type requestFinishedPayload = {
       requestId: string;
@@ -953,114 +1002,44 @@ export module Protocol {
       evicted?: boolean;
     };
   }
-  export module Accessibility {
-    export type AXTree = {
-      role: string;
-      name: string;
-      children?: AXTree[];
-      selected?: boolean;
-      focused?: boolean;
-      pressed?: boolean;
-      focusable?: boolean;
-      haspopup?: boolean;
-      required?: boolean;
-      invalid?: boolean;
-      modal?: boolean;
-      editable?: boolean;
-      busy?: boolean;
-      multiline?: boolean;
-      readonly?: boolean;
-      checked?: ("mixed"|true);
-      expanded?: boolean;
-      disabled?: boolean;
-      multiselectable?: boolean;
-      value?: string;
-      description?: string;
-      roledescription?: string;
-      valuetext?: string;
-      orientation?: string;
-      autocomplete?: string;
-      keyshortcuts?: string;
-      level?: number;
-      tag?: string;
-      foundObject?: boolean;
-    };
-    export type getFullAXTreeParameters = {
-      objectId?: string;
-    };
-    export type getFullAXTreeReturnValue = {
-      tree: {
-        role: string;
-        name: string;
-        children?: AXTree[];
-        selected?: boolean;
-        focused?: boolean;
-        pressed?: boolean;
-        focusable?: boolean;
-        haspopup?: boolean;
-        required?: boolean;
-        invalid?: boolean;
-        modal?: boolean;
-        editable?: boolean;
-        busy?: boolean;
-        multiline?: boolean;
-        readonly?: boolean;
-        checked?: ("mixed"|true);
-        expanded?: boolean;
-        disabled?: boolean;
-        multiselectable?: boolean;
-        value?: string;
-        description?: string;
-        roledescription?: string;
-        valuetext?: string;
-        orientation?: string;
-        autocomplete?: string;
-        keyshortcuts?: string;
-        level?: number;
-        tag?: string;
-        foundObject?: boolean;
-      };
-    };
-  }
-  export interface Events {
-    "Browser.attachedToTarget": Browser.attachedToTargetPayload;
-    "Browser.detachedFromTarget": Browser.detachedFromTargetPayload;
-    "Browser.downloadCreated": Browser.downloadCreatedPayload;
-    "Browser.downloadFinished": Browser.downloadFinishedPayload;
-    "Browser.videoRecordingFinished": Browser.videoRecordingFinishedPayload;
-    "Page.ready": Page.readyPayload;
-    "Page.crashed": Page.crashedPayload;
-    "Page.eventFired": Page.eventFiredPayload;
-    "Page.uncaughtError": Page.uncaughtErrorPayload;
-    "Page.frameAttached": Page.frameAttachedPayload;
-    "Page.frameDetached": Page.frameDetachedPayload;
-    "Page.navigationStarted": Page.navigationStartedPayload;
-    "Page.navigationCommitted": Page.navigationCommittedPayload;
-    "Page.navigationAborted": Page.navigationAbortedPayload;
-    "Page.sameDocumentNavigation": Page.sameDocumentNavigationPayload;
-    "Page.dialogOpened": Page.dialogOpenedPayload;
-    "Page.dialogClosed": Page.dialogClosedPayload;
-    "Page.bindingCalled": Page.bindingCalledPayload;
-    "Page.linkClicked": Page.linkClickedPayload;
-    "Page.willOpenNewWindowAsynchronously": Page.willOpenNewWindowAsynchronouslyPayload;
-    "Page.fileChooserOpened": Page.fileChooserOpenedPayload;
-    "Page.workerCreated": Page.workerCreatedPayload;
-    "Page.workerDestroyed": Page.workerDestroyedPayload;
-    "Page.dispatchMessageFromWorker": Page.dispatchMessageFromWorkerPayload;
-    "Page.videoRecordingStarted": Page.videoRecordingStartedPayload;
-    "Page.webSocketCreated": Page.webSocketCreatedPayload;
-    "Page.webSocketOpened": Page.webSocketOpenedPayload;
-    "Page.webSocketClosed": Page.webSocketClosedPayload;
-    "Page.webSocketFrameSent": Page.webSocketFrameSentPayload;
-    "Page.webSocketFrameReceived": Page.webSocketFrameReceivedPayload;
-    "Page.screencastFrame": Page.screencastFramePayload;
-    "Runtime.executionContextCreated": Runtime.executionContextCreatedPayload;
-    "Runtime.executionContextDestroyed": Runtime.executionContextDestroyedPayload;
-    "Runtime.console": Runtime.consolePayload;
-    "Network.requestWillBeSent": Network.requestWillBeSentPayload;
-    "Network.responseReceived": Network.responseReceivedPayload;
-    "Network.requestFinished": Network.requestFinishedPayload;
-    "Network.requestFailed": Network.requestFailedPayload;
+  export type EventMap = {
+    ["Browser.attachedToTarget"]: [Browser.attachedToTargetPayload];
+    ["Browser.detachedFromTarget"]: [Browser.detachedFromTargetPayload];
+    ["Browser.downloadCreated"]: [Browser.downloadCreatedPayload];
+    ["Browser.downloadFinished"]: [Browser.downloadFinishedPayload];
+    ["Page.ready"]: [Page.readyPayload];
+    ["Page.crashed"]: [Page.crashedPayload];
+    ["Page.eventFired"]: [Page.eventFiredPayload];
+    ["Page.uncaughtError"]: [Page.uncaughtErrorPayload];
+    ["Page.frameAttached"]: [Page.frameAttachedPayload];
+    ["Page.frameDetached"]: [Page.frameDetachedPayload];
+    ["Page.navigationStarted"]: [Page.navigationStartedPayload];
+    ["Page.navigationCommitted"]: [Page.navigationCommittedPayload];
+    ["Page.navigationAborted"]: [Page.navigationAbortedPayload];
+    ["Page.sameDocumentNavigation"]: [Page.sameDocumentNavigationPayload];
+    ["Page.dialogOpened"]: [Page.dialogOpenedPayload];
+    ["Page.dialogClosed"]: [Page.dialogClosedPayload];
+    ["Page.bindingCalled"]: [Page.bindingCalledPayload];
+    ["Page.linkClicked"]: [Page.linkClickedPayload];
+    ["Page.willOpenNewWindowAsynchronously"]: [Page.willOpenNewWindowAsynchronouslyPayload];
+    ["Page.fileChooserOpened"]: [Page.fileChooserOpenedPayload];
+    ["Page.workerCreated"]: [Page.workerCreatedPayload];
+    ["Page.workerDestroyed"]: [Page.workerDestroyedPayload];
+    ["Page.dispatchMessageFromWorker"]: [Page.dispatchMessageFromWorkerPayload];
+    ["Page.webSocketCreated"]: [Page.webSocketCreatedPayload];
+    ["Page.webSocketOpened"]: [Page.webSocketOpenedPayload];
+    ["Page.webSocketClosed"]: [Page.webSocketClosedPayload];
+    ["Page.webSocketFrameSent"]: [Page.webSocketFrameSentPayload];
+    ["Page.webSocketFrameReceived"]: [Page.webSocketFrameReceivedPayload];
+    ["Page.screencastFrame"]: [Page.screencastFramePayload];
+    ["Runtime.executionContextCreated"]: [Runtime.executionContextCreatedPayload];
+    ["Runtime.executionContextDestroyed"]: [Runtime.executionContextDestroyedPayload];
+    ["Runtime.executionContextsCleared"]: [Runtime.executionContextsClearedPayload];
+    ["Runtime.console"]: [Runtime.consolePayload];
+    ["Network.requestWillBeSent"]: [Network.requestWillBeSentPayload];
+    ["Network.responseReceived"]: [Network.responseReceivedPayload];
+    ["Network.requestFinished"]: [Network.requestFinishedPayload];
+    ["Network.requestFailed"]: [Network.requestFailedPayload];
   }
   export interface CommandParameters {
     "Browser.enable": Browser.enableParameters;
@@ -1070,10 +1049,12 @@ export module Protocol {
     "Browser.close": Browser.closeParameters;
     "Browser.getInfo": Browser.getInfoParameters;
     "Browser.setExtraHTTPHeaders": Browser.setExtraHTTPHeadersParameters;
+    "Browser.clearCache": Browser.clearCacheParameters;
     "Browser.setBrowserProxy": Browser.setBrowserProxyParameters;
     "Browser.setContextProxy": Browser.setContextProxyParameters;
     "Browser.setHTTPCredentials": Browser.setHTTPCredentialsParameters;
     "Browser.setRequestInterception": Browser.setRequestInterceptionParameters;
+    "Browser.setCacheDisabled": Browser.setCacheDisabledParameters;
     "Browser.setGeolocationOverride": Browser.setGeolocationOverrideParameters;
     "Browser.setUserAgentOverride": Browser.setUserAgentOverrideParameters;
     "Browser.setPlatformOverride": Browser.setPlatformOverrideParameters;
@@ -1085,8 +1066,7 @@ export module Protocol {
     "Browser.setDownloadOptions": Browser.setDownloadOptionsParameters;
     "Browser.setTouchOverride": Browser.setTouchOverrideParameters;
     "Browser.setDefaultViewport": Browser.setDefaultViewportParameters;
-    "Browser.setScrollbarsHidden": Browser.setScrollbarsHiddenParameters;
-    "Browser.addScriptToEvaluateOnNewDocument": Browser.addScriptToEvaluateOnNewDocumentParameters;
+    "Browser.setInitScripts": Browser.setInitScriptsParameters;
     "Browser.addBinding": Browser.addBindingParameters;
     "Browser.grantPermissions": Browser.grantPermissionsParameters;
     "Browser.resetPermissions": Browser.resetPermissionsParameters;
@@ -1097,18 +1077,21 @@ export module Protocol {
     "Browser.setColorScheme": Browser.setColorSchemeParameters;
     "Browser.setReducedMotion": Browser.setReducedMotionParameters;
     "Browser.setForcedColors": Browser.setForcedColorsParameters;
-    "Browser.setVideoRecordingOptions": Browser.setVideoRecordingOptionsParameters;
+    "Browser.setContrast": Browser.setContrastParameters;
+    "Browser.setScreencastOptions": Browser.setScreencastOptionsParameters;
     "Browser.cancelDownload": Browser.cancelDownloadParameters;
+    "Heap.collectGarbage": Heap.collectGarbageParameters;
     "Page.close": Page.closeParameters;
     "Page.setFileInputFiles": Page.setFileInputFilesParameters;
     "Page.addBinding": Page.addBindingParameters;
     "Page.setViewportSize": Page.setViewportSizeParameters;
+    "Page.setZoom": Page.setZoomParameters;
     "Page.bringToFront": Page.bringToFrontParameters;
     "Page.setEmulatedMedia": Page.setEmulatedMediaParameters;
     "Page.setCacheDisabled": Page.setCacheDisabledParameters;
     "Page.describeNode": Page.describeNodeParameters;
     "Page.scrollIntoViewIfNeeded": Page.scrollIntoViewIfNeededParameters;
-    "Page.addScriptToEvaluateOnNewDocument": Page.addScriptToEvaluateOnNewDocumentParameters;
+    "Page.setInitScripts": Page.setInitScriptsParameters;
     "Page.navigate": Page.navigateParameters;
     "Page.goBack": Page.goBackParameters;
     "Page.goForward": Page.goForwardParameters;
@@ -1139,7 +1122,6 @@ export module Protocol {
     "Network.resumeInterceptedRequest": Network.resumeInterceptedRequestParameters;
     "Network.fulfillInterceptedRequest": Network.fulfillInterceptedRequestParameters;
     "Network.getResponseBody": Network.getResponseBodyParameters;
-    "Accessibility.getFullAXTree": Accessibility.getFullAXTreeParameters;
   }
   export interface CommandReturnValues {
     "Browser.enable": Browser.enableReturnValue;
@@ -1149,10 +1131,12 @@ export module Protocol {
     "Browser.close": Browser.closeReturnValue;
     "Browser.getInfo": Browser.getInfoReturnValue;
     "Browser.setExtraHTTPHeaders": Browser.setExtraHTTPHeadersReturnValue;
+    "Browser.clearCache": Browser.clearCacheReturnValue;
     "Browser.setBrowserProxy": Browser.setBrowserProxyReturnValue;
     "Browser.setContextProxy": Browser.setContextProxyReturnValue;
     "Browser.setHTTPCredentials": Browser.setHTTPCredentialsReturnValue;
     "Browser.setRequestInterception": Browser.setRequestInterceptionReturnValue;
+    "Browser.setCacheDisabled": Browser.setCacheDisabledReturnValue;
     "Browser.setGeolocationOverride": Browser.setGeolocationOverrideReturnValue;
     "Browser.setUserAgentOverride": Browser.setUserAgentOverrideReturnValue;
     "Browser.setPlatformOverride": Browser.setPlatformOverrideReturnValue;
@@ -1164,8 +1148,7 @@ export module Protocol {
     "Browser.setDownloadOptions": Browser.setDownloadOptionsReturnValue;
     "Browser.setTouchOverride": Browser.setTouchOverrideReturnValue;
     "Browser.setDefaultViewport": Browser.setDefaultViewportReturnValue;
-    "Browser.setScrollbarsHidden": Browser.setScrollbarsHiddenReturnValue;
-    "Browser.addScriptToEvaluateOnNewDocument": Browser.addScriptToEvaluateOnNewDocumentReturnValue;
+    "Browser.setInitScripts": Browser.setInitScriptsReturnValue;
     "Browser.addBinding": Browser.addBindingReturnValue;
     "Browser.grantPermissions": Browser.grantPermissionsReturnValue;
     "Browser.resetPermissions": Browser.resetPermissionsReturnValue;
@@ -1176,18 +1159,21 @@ export module Protocol {
     "Browser.setColorScheme": Browser.setColorSchemeReturnValue;
     "Browser.setReducedMotion": Browser.setReducedMotionReturnValue;
     "Browser.setForcedColors": Browser.setForcedColorsReturnValue;
-    "Browser.setVideoRecordingOptions": Browser.setVideoRecordingOptionsReturnValue;
+    "Browser.setContrast": Browser.setContrastReturnValue;
+    "Browser.setScreencastOptions": Browser.setScreencastOptionsReturnValue;
     "Browser.cancelDownload": Browser.cancelDownloadReturnValue;
+    "Heap.collectGarbage": Heap.collectGarbageReturnValue;
     "Page.close": Page.closeReturnValue;
     "Page.setFileInputFiles": Page.setFileInputFilesReturnValue;
     "Page.addBinding": Page.addBindingReturnValue;
     "Page.setViewportSize": Page.setViewportSizeReturnValue;
+    "Page.setZoom": Page.setZoomReturnValue;
     "Page.bringToFront": Page.bringToFrontReturnValue;
     "Page.setEmulatedMedia": Page.setEmulatedMediaReturnValue;
     "Page.setCacheDisabled": Page.setCacheDisabledReturnValue;
     "Page.describeNode": Page.describeNodeReturnValue;
     "Page.scrollIntoViewIfNeeded": Page.scrollIntoViewIfNeededReturnValue;
-    "Page.addScriptToEvaluateOnNewDocument": Page.addScriptToEvaluateOnNewDocumentReturnValue;
+    "Page.setInitScripts": Page.setInitScriptsReturnValue;
     "Page.navigate": Page.navigateReturnValue;
     "Page.goBack": Page.goBackReturnValue;
     "Page.goForward": Page.goForwardReturnValue;
@@ -1218,6 +1204,5 @@ export module Protocol {
     "Network.resumeInterceptedRequest": Network.resumeInterceptedRequestReturnValue;
     "Network.fulfillInterceptedRequest": Network.fulfillInterceptedRequestReturnValue;
     "Network.getResponseBody": Network.getResponseBodyReturnValue;
-    "Accessibility.getFullAXTree": Accessibility.getFullAXTreeReturnValue;
   }
 }

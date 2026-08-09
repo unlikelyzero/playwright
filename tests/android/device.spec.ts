@@ -15,7 +15,7 @@
  */
 
 import fs from 'fs';
-import { PNG } from 'pngjs';
+import { PNG } from 'playwright-core/lib/utilsBundle';
 import { androidTest as test, expect } from './androidTest';
 
 test('androidDevice.shell', async function({ androidDevice }) {
@@ -27,7 +27,7 @@ test('androidDevice.open', async function({ androidDevice }) {
   const socket = await androidDevice.open('shell:/bin/cat');
   await socket.write(Buffer.from('321\n'));
   const output = await new Promise(resolve => socket.on('data', resolve));
-  expect(output.toString()).toBe('321\n');
+  expect(output!.toString()).toBe('321\n');
   const closedPromise = new Promise<void>(resolve => socket.on('close', resolve));
   await socket.close();
   await closedPromise;
@@ -44,16 +44,17 @@ test('androidDevice.screenshot', async function({ androidDevice }, testInfo) {
 });
 
 test('androidDevice.push', async function({ androidDevice }) {
-  await androidDevice.shell('rm /data/local/tmp/hello-world');
-  await androidDevice.push(Buffer.from('hello world'), '/data/local/tmp/hello-world');
-  const data = await androidDevice.shell('cat /data/local/tmp/hello-world');
-  expect(data).toEqual(Buffer.from('hello world'));
+  try {
+    await androidDevice.push(Buffer.from('hello world'), '/data/local/tmp/hello-world');
+    const data = await androidDevice.shell('cat /data/local/tmp/hello-world');
+    expect(data).toEqual(Buffer.from('hello world'));
+  } finally {
+    await androidDevice.shell('rm /data/local/tmp/hello-world');
+  }
 });
 
 test('androidDevice.fill', async function({ androidDevice }) {
-  test.fixme(!!process.env.CI, 'Hangs on the bots');
-
   await androidDevice.shell('am start org.chromium.webview_shell/.WebViewBrowserActivity');
-  await androidDevice.fill({ res: 'org.chromium.webview_shell:id/url_field' }, 'Hello');
+  await androidDevice.fill({ res: 'org.chromium.webview_shell:id/url_field' }, 'Hello', { timeout: test.info().timeout });
   expect((await androidDevice.info({ res: 'org.chromium.webview_shell:id/url_field' })).text).toBe('Hello');
 });

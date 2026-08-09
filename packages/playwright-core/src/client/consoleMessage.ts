@@ -14,40 +14,59 @@
  * limitations under the License.
  */
 
-import * as util from 'util';
+import { inspect } from 'util';
+
 import { JSHandle } from './jsHandle';
-import * as channels from '../protocol/channels';
-import { ChannelOwner } from './channelOwner';
-import * as api from '../../types/types';
 
-type ConsoleMessageLocation = channels.ConsoleMessageInitializer['location'];
+import type * as api from '../../types/types';
+import type * as channels from './channels';
+import type { Page } from './page';
+import type { Worker } from './worker';
 
-export class ConsoleMessage extends ChannelOwner<channels.ConsoleMessageChannel> implements api.ConsoleMessage {
-  static from(message: channels.ConsoleMessageChannel): ConsoleMessage {
-    return (message as any)._object;
+export class ConsoleMessage implements api.ConsoleMessage {
+
+  private _page: Page | null;
+  private _worker: Worker | null;
+  private _event: channels.BrowserContextConsoleEvent | channels.WorkerConsoleEvent | channels.ElectronApplicationConsoleEvent;
+
+  constructor(event: channels.BrowserContextConsoleEvent | channels.WorkerConsoleEvent | channels.ElectronApplicationConsoleEvent, page: Page | null, worker: Worker | null) {
+    this._page = page;
+    this._worker = worker;
+    this._event = event;
+    if (inspect.custom)
+      (this as any)[inspect.custom] = () => this._inspect();
   }
 
-  constructor(parent: ChannelOwner, type: string, guid: string, initializer: channels.ConsoleMessageInitializer) {
-    super(parent, type, guid, initializer);
+  worker() {
+    return this._worker;
   }
 
-  type(): string {
-    return this._initializer.type;
+  page() {
+    return this._page;
+  }
+
+  type(): ReturnType<api.ConsoleMessage['type']> {
+    return this._event.type as ReturnType<api.ConsoleMessage['type']>;
   }
 
   text(): string {
-    return this._initializer.text;
+    return this._event.text;
   }
 
   args(): JSHandle[] {
-    return this._initializer.args.map(JSHandle.from);
+    return this._event.args.map(JSHandle.from);
   }
 
-  location(): ConsoleMessageLocation {
-    return this._initializer.location;
+  location(): ReturnType<api.ConsoleMessage['location']> {
+    const { url, lineNumber, columnNumber } = this._event.location;
+    return { url, line: lineNumber, column: columnNumber, lineNumber, columnNumber };
   }
 
-  [util.inspect.custom]() {
+  timestamp(): number {
+    return this._event.timestamp;
+  }
+
+  private _inspect() {
     return this.text();
   }
 }

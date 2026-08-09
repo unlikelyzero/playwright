@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { Page } from 'playwright-core';
+import type { Page } from 'playwright-core';
 import { test as it, expect } from './pageTest';
 
 async function routeIframe(page: Page) {
@@ -40,16 +40,16 @@ async function routeIframe(page: Page) {
   });
   await page.route('**/iframe-2.html', route => {
     route.fulfill({
-      body: '<html><button>Hello nested iframe</button></html>',
+      body: '<html><button tag="iframe2">Hello nested iframe</button></html>',
       contentType: 'text/html'
     }).catch(() => {});
   });
 }
 
-it('should work for iframe #smoke', async ({ page, server }) => {
+it('should work for iframe @smoke', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const button = page.locator('iframe >> control=enter-frame >> button');
+  const button = page.locator('iframe >> internal:control=enter-frame >> button');
   await button.waitFor();
   expect(await button.innerText()).toBe('Hello iframe');
   await expect(button).toHaveText('Hello iframe');
@@ -60,7 +60,7 @@ it('should work for iframe (handle)', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
   const body = await page.$('body');
-  const button = await body.waitForSelector('iframe >> control=enter-frame >> button');
+  const button = await body.waitForSelector('iframe >> internal:control=enter-frame >> button');
   expect(await button.innerText()).toBe('Hello iframe');
   expect(await button.textContent()).toBe('Hello iframe');
   await button.click();
@@ -69,7 +69,7 @@ it('should work for iframe (handle)', async ({ page, server }) => {
 it('should work for nested iframe', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const button = page.locator('iframe >> control=enter-frame >> iframe >> control=enter-frame >> button');
+  const button = page.locator('iframe >> internal:control=enter-frame >> iframe >> internal:control=enter-frame >> button');
   await button.waitFor();
   expect(await button.innerText()).toBe('Hello nested iframe');
   await expect(button).toHaveText('Hello nested iframe');
@@ -80,7 +80,7 @@ it('should work for nested iframe (handle)', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
   const body = await page.$('body');
-  const button = await body.waitForSelector('iframe >> control=enter-frame >> iframe >> control=enter-frame >> button');
+  const button = await body.waitForSelector('iframe >> internal:control=enter-frame >> iframe >> internal:control=enter-frame >> button');
   expect(await button.innerText()).toBe('Hello nested iframe');
   expect(await button.textContent()).toBe('Hello nested iframe');
   await button.click();
@@ -89,66 +89,60 @@ it('should work for nested iframe (handle)', async ({ page, server }) => {
 it('should work for $ and $$', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const element = await page.$('iframe >> control=enter-frame >> button');
+  const element = await page.$('iframe >> internal:control=enter-frame >> button');
   expect(await element.textContent()).toBe('Hello iframe');
-  const elements = await page.$$('iframe >> control=enter-frame >> span');
+  const elements = await page.$$('iframe >> internal:control=enter-frame >> span');
   expect(elements).toHaveLength(2);
 });
 
 it('$ should not wait for frame', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
-  expect(await page.$('iframe >> control=enter-frame >> canvas')).toBeFalsy();
+  expect(await page.$('iframe >> internal:control=enter-frame >> canvas')).toBeFalsy();
   const body = await page.$('body');
-  expect(await body.$('iframe >> control=enter-frame >> canvas')).toBeFalsy();
+  expect(await body.$('iframe >> internal:control=enter-frame >> canvas')).toBeFalsy();
 });
 
 it('$$ should not wait for frame', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
-  expect(await page.$$('iframe >> control=enter-frame >> canvas')).toHaveLength(0);
+  expect(await page.$$('iframe >> internal:control=enter-frame >> canvas')).toHaveLength(0);
   const body = await page.$('body');
-  expect(await body.$$('iframe >> control=enter-frame >> canvas')).toHaveLength(0);
+  expect(await body.$$('iframe >> internal:control=enter-frame >> canvas')).toHaveLength(0);
 });
 
 it('$eval should throw for missing frame', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   {
-    const error = await page.$eval('iframe >> control=enter-frame >> canvas', e => 1).catch(e => e);
-    expect(error.message).toContain('Error: failed to find element matching selector');
+    const error = await page.$eval('iframe >> internal:control=enter-frame >> canvas', e => 1).catch(e => e);
+    expect(error.message).toContain('page.$eval: Failed to find element matching selector');
   }
   {
     const body = await page.$('body');
-    const error = await body.$eval('iframe >> control=enter-frame >> canvas', e => 1).catch(e => e);
-    expect(error.message).toContain('Error: failed to find element matching selector');
+    const error = await body.$eval('iframe >> internal:control=enter-frame >> canvas', e => 1).catch(e => e);
+    expect(error.message).toContain('elementHandle.$eval: Failed to find element matching selector');
   }
 });
 
-it('$$eval should throw for missing frame', async ({ page, server }) => {
+it('$$eval should not throw for missing frame', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
-  {
-    const error = await page.$$eval('iframe >> control=enter-frame >> canvas', e => 1).catch(e => e);
-    expect(error.message).toContain('Error: failed to find frame for selector');
-  }
-  {
-    const body = await page.$('body');
-    const error = await body.$$eval('iframe >> control=enter-frame >> canvas', e => 1).catch(e => e);
-    expect(error.message).toContain('Error: failed to find frame for selector');
-  }
+  expect(await page.$$eval('iframe >> internal:control=enter-frame >> canvas', e => e.length)).toBe(0);
+  const body = await page.$('body');
+  expect(await body.$$eval('iframe >> internal:control=enter-frame >> canvas', e => e.length)).toBe(0);
 });
 
 it('should work for $ and $$ (handle)', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
   const body = await page.$('body');
-  const element = await body.$('iframe >> control=enter-frame >> button');
+  const element = await body.$('iframe >> internal:control=enter-frame >> button');
   expect(await element.textContent()).toBe('Hello iframe');
-  const elements = await body.$$('iframe >> control=enter-frame >> span');
+  const elements = await body.$$('iframe >> internal:control=enter-frame >> span');
   expect(elements).toHaveLength(2);
 });
 
 it('should work for $eval', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const value = await page.$eval('iframe >> control=enter-frame >> button', b => b.nodeName);
+  const value = await page.$eval('iframe >> internal:control=enter-frame >> button', b => b.nodeName);
   expect(value).toBe('BUTTON');
 });
 
@@ -156,14 +150,14 @@ it('should work for $eval (handle)', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
   const body = await page.$('body');
-  const value = await body.$eval('iframe >> control=enter-frame >> button', b => b.nodeName);
+  const value = await body.$eval('iframe >> internal:control=enter-frame >> button', b => b.nodeName);
   expect(value).toBe('BUTTON');
 });
 
 it('should work for $$eval', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const value = await page.$$eval('iframe >> control=enter-frame >> span', ss => ss.map(s => s.textContent));
+  const value = await page.$$eval('iframe >> internal:control=enter-frame >> span', ss => ss.map(s => s.textContent));
   expect(value).toEqual(['1', '2']);
 });
 
@@ -171,30 +165,30 @@ it('should work for $$eval (handle)', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
   const body = await page.$('body');
-  const value = await body.$$eval('iframe >> control=enter-frame >> span', ss => ss.map(s => s.textContent));
+  const value = await body.$$eval('iframe >> internal:control=enter-frame >> span', ss => ss.map(s => s.textContent));
   expect(value).toEqual(['1', '2']);
 });
 
 it('should not allow dangling enter-frame', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const button = page.locator('iframe >> control=enter-frame');
+  const button = page.locator('iframe >> internal:control=enter-frame');
   const error = await button.click().catch(e => e);
   expect(error.message).toContain('Selector cannot end with');
-  expect(error.message).toContain('iframe >> control=enter-frame');
+  expect(error.message).toContain('iframe >> internal:control=enter-frame');
 });
 
 it('should not allow leading enter-frame', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const error = await page.waitForSelector('control=enter-frame >> button').catch(e => e);
+  const error = await page.waitForSelector('internal:control=enter-frame >> button').catch(e => e);
   expect(error.message).toContain('Selector cannot start with');
 });
 
 it('should not allow capturing before enter-frame', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const button = page.locator('*css=iframe >> control=enter-frame >> div');
+  const button = page.locator('*css=iframe >> internal:control=enter-frame >> div');
   const error = await await button.click().catch(e => e);
   expect(error.message).toContain('Can not capture the selector before diving into the frame');
 });
@@ -202,7 +196,7 @@ it('should not allow capturing before enter-frame', async ({ page, server }) => 
 it('should capture after the enter-frame', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const div = page.locator('iframe >> control=enter-frame >> *css=div >> button');
+  const div = page.locator('iframe >> internal:control=enter-frame >> *css=div >> button');
   expect(await div.innerHTML()).toContain('<button>');
 });
 
@@ -219,18 +213,18 @@ it('should click in lazy iframe', async ({ page, server }) => {
 
   // add blank iframe
   setTimeout(() => {
-    page.evaluate(() => {
+    void page.evaluate(() => {
       const iframe = document.createElement('iframe');
       document.body.appendChild(iframe);
     });
     // navigate iframe
     setTimeout(() => {
-      page.evaluate(() => document.querySelector('iframe').src = 'iframe.html');
+      void page.evaluate(() => document.querySelector('iframe').src = 'iframe.html');
     }, 500);
   }, 500);
 
   // Click in iframe
-  const button = page.locator('iframe >> control=enter-frame >> button');
+  const button = page.locator('iframe >> internal:control=enter-frame >> button');
   const [, text] = await Promise.all([
     button.click(),
     button.innerText(),
@@ -242,7 +236,7 @@ it('should click in lazy iframe', async ({ page, server }) => {
 it('waitFor should survive frame reattach', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const button = page.locator('iframe >> control=enter-frame >> button:has-text("Hello nested iframe")');
+  const button = page.locator('iframe >> internal:control=enter-frame >> button:has-text("Hello nested iframe")');
   const promise = button.waitFor();
   await page.locator('iframe').evaluate(e => e.remove());
   await page.evaluate(() => {
@@ -257,7 +251,7 @@ it('waitForSelector should survive frame reattach (handle)', async ({ page, serv
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
   const body = await page.$('body');
-  const promise = body.waitForSelector('iframe >> control=enter-frame >> button:has-text("Hello nested iframe")');
+  const promise = body.waitForSelector('iframe >> internal:control=enter-frame >> button:has-text("Hello nested iframe")');
   await page.locator('iframe').evaluate(e => e.remove());
   await page.evaluate(() => {
     const iframe = document.createElement('iframe');
@@ -271,15 +265,15 @@ it('waitForSelector should survive iframe navigation (handle)', async ({ page, s
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
   const body = await page.$('body');
-  const promise = body.waitForSelector('iframe >> control=enter-frame >> button:has-text("Hello nested iframe")');
-  page.locator('iframe').evaluate(e => (e as HTMLIFrameElement).src = 'iframe-2.html');
+  const promise = body.waitForSelector('iframe >> internal:control=enter-frame >> button:has-text("Hello nested iframe")');
+  void page.locator('iframe').evaluate(e => (e as HTMLIFrameElement).src = 'iframe-2.html');
   await promise;
 });
 
 it('click should survive frame reattach', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const button = page.locator('iframe >> control=enter-frame >> button:has-text("Hello nested iframe")');
+  const button = page.locator('iframe >> internal:control=enter-frame >> button:has-text("Hello nested iframe")');
   const promise = button.click();
   await page.locator('iframe').evaluate(e => e.remove());
   await page.evaluate(() => {
@@ -293,9 +287,9 @@ it('click should survive frame reattach', async ({ page, server }) => {
 it('click should survive iframe navigation', async ({ page, server }) => {
   await routeIframe(page);
   await page.goto(server.EMPTY_PAGE);
-  const button = page.locator('iframe >> control=enter-frame >> button:has-text("Hello nested iframe")');
+  const button = page.locator('iframe >> internal:control=enter-frame >> button:has-text("Hello nested iframe")');
   const promise = button.click();
-  page.locator('iframe').evaluate(e => (e as HTMLIFrameElement).src = 'iframe-2.html');
+  void page.locator('iframe').evaluate(e => (e as HTMLIFrameElement).src = 'iframe-2.html');
   await promise;
 });
 
@@ -308,22 +302,106 @@ it('click should survive navigation', async ({ page, server }) => {
   await promise;
 });
 
-it('should fail if element removed while waiting on element handle', async ({ page, server }) => {
-  it.fixme();
-  await routeIframe(page);
-  await page.goto(server.PREFIX + '/iframe.html');
-  const button = await page.$('button');
-  const promise = button.waitForSelector('something');
-  await page.waitForTimeout(100);
-  await page.evaluate(() => document.body.innerText = '');
-  await promise;
-});
-
 it('should non work for non-frame', async ({ page, server }) => {
   await routeIframe(page);
   await page.setContent('<div></div>');
-  const button = page.locator('div >> control=enter-frame >> button');
+  const button = page.locator('div >> internal:control=enter-frame >> button');
   const error = await button.waitFor().catch(e => e);
   expect(error.message).toContain('<div></div>');
   expect(error.message).toContain('<iframe> was expected');
+});
+
+it('should pierce frames into a single descendant frame', async ({ page, server }) => {
+  await routeIframe(page);
+  await page.goto(server.EMPTY_PAGE);
+  // The main frame has no <div>; only the iframe.html child frame does.
+  const div = page.locator('internal:control=pierce-frames >> div');
+  await div.waitFor();
+  await expect(div).toHaveCount(1);
+  expect(await div.innerHTML()).toContain('<button>Hello iframe</button>');
+});
+
+it('should pierce through multiple frames', async ({ page, server }) => {
+  await routeIframe(page);
+  await page.goto(server.EMPTY_PAGE);
+  // The main frame has no <div>; only the iframe.html child frame does.
+  const button = page.locator('internal:control=pierce-frames >> button[tag="iframe2"]');
+  await button.waitFor();
+  await expect(button).toHaveCount(1);
+  expect(await button.textContent()).toBe('Hello nested iframe');
+});
+
+it('should pierce multiple times', async ({ page, server }) => {
+  await routeIframe(page);
+  await page.goto(server.EMPTY_PAGE);
+  // Main and nested frames have no <div>; only the iframe.html child frame does.
+  const button = page.locator('internal:control=pierce-frames >> div >> button[tag="iframe2"]');
+  await button.waitFor();
+  await expect(button).toHaveCount(1);
+  expect(await button.textContent()).toBe('Hello nested iframe');
+});
+
+it('should match multiple elements', async ({ page, server }) => {
+  await page.route('**/empty.html', route => {
+    route.fulfill({ body: '<iframe src="a.html"></iframe><iframe src="b.html"></iframe>', contentType: 'text/html' }).catch(() => {});
+  });
+  await page.route('**/a.html', route => {
+    route.fulfill({ body: '<div>one</div>', contentType: 'text/html' }).catch(() => {});
+  });
+  await page.route('**/b.html', route => {
+    route.fulfill({ body: '<span>two</span><span>three</span>', contentType: 'text/html' }).catch(() => {});
+  });
+  await page.goto(server.EMPTY_PAGE);
+
+  const texts = await page.$$eval('internal:control=pierce-frames >> span', els => els.map(e => e.textContent));
+  expect(texts).toEqual(['two', 'three']);
+});
+
+it('should throw when piercing frames matches multiple frames', async ({ page, server }) => {
+  await page.route('**/empty.html', route => {
+    route.fulfill({ body: '<iframe src="a.html"></iframe><iframe src="b.html"></iframe>', contentType: 'text/html' }).catch(() => {});
+  });
+  await page.route('**/a.html', route => {
+    route.fulfill({ body: '<div>one</div>', contentType: 'text/html' }).catch(() => {});
+  });
+  await page.route('**/b.html', route => {
+    route.fulfill({ body: '<div>two</div>', contentType: 'text/html' }).catch(() => {});
+  });
+  await page.goto(server.EMPTY_PAGE);
+
+  // Make sure both child frames have their <div> before piercing, otherwise resolution
+  // may transiently collapse to a single frame.
+  await expect.poll(() => page.frames().length).toBe(3);
+  for (const frame of page.frames()) {
+    if (frame !== page.mainFrame())
+      await frame.waitForSelector('div');
+  }
+
+  const error = await page.locator('internal:control=pierce-frames >> div').innerHTML().catch(e => e);
+  expect(error.message).toContain('Pierce-frame mode matched elements from multiple frames');
+});
+
+it('should not allow pierce-frames in the middle of a selector', async ({ page, server }) => {
+  await routeIframe(page);
+  await page.goto(server.EMPTY_PAGE);
+  const error = await page.locator('iframe >> internal:control=pierce-frames >> div').waitFor().catch(e => e);
+  expect(error.message).toContain('"pierce-frames" is only allowed as the first selector token');
+});
+
+it('should allow entering frames while piercing', async ({ page, server }) => {
+  await routeIframe(page);
+  await page.goto(server.EMPTY_PAGE);
+  const button = page.locator('internal:control=pierce-frames >> iframe[src="iframe-2.html"] >> internal:control=enter-frame >> button');
+  await button.waitFor();
+  expect(await button.innerText()).toBe('Hello nested iframe');
+});
+
+it('should not allow pierce-frames after entering a frame', async ({ page }) => {
+  const error = await page.locator('iframe >> internal:control=enter-frame >> internal:control=pierce-frames >> button').count().catch(e => e);
+  expect(error.message).toContain('"pierce-frames" is only allowed as the first selector token');
+});
+
+it('should not allow dangling enter-frame while piercing', async ({ page }) => {
+  const error = await page.locator('internal:control=pierce-frames >> iframe >> internal:control=enter-frame').count().catch(e => e);
+  expect(error.message).toContain('Selector cannot end with entering frame');
 });

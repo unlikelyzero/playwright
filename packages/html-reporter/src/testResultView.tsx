@@ -14,177 +14,301 @@
   limitations under the License.
 */
 
-import type { TestAttachment, TestCase, TestResult, TestStep } from '@playwright/test/src/reporters/html';
-import ansi2html from 'ansi-to-html';
+import type { TestAttachment, TestCase, TestCaseSummary, TestResult, TestStep } from './types';
 import * as React from 'react';
 import { TreeItem } from './treeItem';
-import { TabbedPane } from './tabbedPane';
-import { msToString } from './uiUtils';
+import { formatUrl } from './utils';
+import { msToString } from '@isomorphic/formatUtils';
 import { AutoChip } from './chip';
 import { traceImage } from './images';
-import { AttachmentLink } from './links';
+import { Anchor, AttachmentLink, generateTraceUrl, testResultHref, useSearchParams } from './links';
 import { statusIcon } from './statusIcon';
+import type { ImageDiff } from '@web/shared/imageDiffView';
+import { ImageDiffView } from '@web/shared/imageDiffView';
+import { CodeSnippet, PromptButton, TestScreenshotErrorView } from './testErrorView';
+import * as icons from './icons';
 import './testResultView.css';
+import { useAsyncMemo } from '@web/uiUtils';
+import type { LoadedReport } from './loadedReport';
+import { TestCaseListView } from './testFileView';
+import { stripAnsiEscapes } from '@isomorphic/stringUtils';
 
-const imageDiffNames = ['expected', 'actual', 'diff'];
+interface ImageDiffWithAnchors extends ImageDiff {
+  anchors: string[];
+}
+
+function groupImageDiffs(screenshots: Set<TestAttachment>, result: TestResult): ImageDiffWithAnchors[] {
+  const snapshotNameToImageDiff = new Map<string, ImageDiffWithAnchors>();
+  for (const attachment of screenshots) {
+    const match = attachment.name.match(/^(.*)-(expected|actual|diff|previous)(\.[^.]+)?$/);
+    if (!match)
+      continue;
+    const [, name, category, extension = ''] = match;
+    const snapshotName = name + extension;
+    let imageDiff = snapshotNameToImageDiff.get(snapshotName);
+    if (!imageDiff) {
+      imageDiff = { name: snapshotName, anchors: [`attachment-${name}`] };
+      snapshotNameToImageDiff.set(snapshotName, imageDiff);
+    }
+    imageDiff.anchors.push(`attachment-${result.attachments.indexOf(attachment)}`);
+    if (category === 'actual')
+      imageDiff.actual = { attachment };
+    if (category === 'expected')
+      imageDiff.expected = { attachment, title: 'Expected' };
+    if (category === 'previous')
+      imageDiff.expected = { attachment, title: 'Previous' };
+    if (category === 'diff')
+      imageDiff.diff = { attachment };
+  }
+  for (const [name, diff] of snapshotNameToImageDiff) {
+    if (!diff.actual || !diff.expected) {
+      snapshotNameToImageDiff.delete(name);
+    } else {
+      screenshots.delete(diff.actual.attachment);
+      screenshots.delete(diff.expected.attachment);
+      screenshots.delete(diff.diff?.attachment!);
+    }
+  }
+  return [...snapshotNameToImageDiff.values()];
+}
 
 export const TestResultView: React.FC<{
+  report: LoadedReport,
   test: TestCase,
   result: TestResult,
-}> = ({ result }) => {
-
-  const { screenshots, videos, traces, otherAttachments, attachmentsMap } = React.useMemo(() => {
-    const attachmentsMap = new Map<string, TestAttachment>();
-    const attachments = result?.attachments || [];
-    const otherAttachments = new Set<TestAttachment>(attachments);
-    const screenshots = attachments.filter(a => a.contentType.startsWith('image/') && !imageDiffNames.includes(a.name));
-    const videos = attachments.filter(a => a.name === 'video');
+}> = ({ report, test, result }) => {
+  const { screenshots, videos, traces, otherAttachments, diffs, errors, otherAttachmentAnchors, screenshotAnchors, errorContext } = React.useMemo(() => {
+    const attachments = result.attachments.filter(a => !a.name.startsWith('_'));
+    const screenshots = new Set(attachments.filter(a => a.contentType.startsWith('image/')));
+    const screenshotAnchors = [...screenshots].map(a => `attachment-${attachments.indexOf(a)}`);
+    const videos = attachments.filter(a => a.contentType.startsWith('video/'));
     const traces = attachments.filter(a => a.name === 'trace');
-    for (const a of attachments)
-      attachmentsMap.set(a.name, a);
+    const errorContext = attachments.find(a => a.name === 'error-context');
+    const otherAttachments = new Set<TestAttachment>(attachments);
     [...screenshots, ...videos, ...traces].forEach(a => otherAttachments.delete(a));
-    return { attachmentsMap, screenshots, videos, otherAttachments, traces };
-  }, [ result ]);
+    const otherAttachmentAnchors = [...otherAttachments].map(a => `attachment-${attachments.indexOf(a)}`);
+    const diffs = groupImageDiffs(screenshots, result);
+    const errors = result.errors.map(e => e.message);
+    return { screenshots: [...screenshots], videos, traces, otherAttachments, diffs, errors, otherAttachmentAnchors, screenshotAnchors, errorContext };
+  }, [result]);
 
-  const expected = attachmentsMap.get('expected');
-  const actual = attachmentsMap.get('actual');
-  const diff = attachmentsMap.get('diff');
-  const hasImages = [actual?.contentType, expected?.contentType, diff?.contentType].some(v => v && /^image\//i.test(v));
+  const [stepFilterText, setStepFilterText] = React.useState('');
+  React.useEffect(() => setStepFilterText(''), [result]);
+
+  const prompt = useAsyncMemo(async () => {
+    if (report.json().options?.noCopyPrompt)
+      return undefined;
+    if (!errorContext)
+      return undefined;
+
+    let text = errorContext.path ? await fetch(errorContext.path).then(r => r.text()) : errorContext.body;
+    if (!text)
+      return undefined;
+
+    const stdoutAttachment = result.attachments.find(a => a.name === 'stdout');
+    const stderrAttachment = result.attachments.find(a => a.name === 'stderr');
+    const stdout = stdoutAttachment?.body && stdoutAttachment.contentType === 'text/plain' ? stdoutAttachment.body : undefined;
+    const stderr = stderrAttachment?.body && stderrAttachment.contentType === 'text/plain' ? stderrAttachment.body : undefined;
+    if (stdout)
+      text += '\n\n# Stdout\n\n```\n' + stripAnsiEscapes(stdout) + '\n```';
+    if (stderr)
+      text += '\n\n# Stderr\n\n```\n' + stripAnsiEscapes(stderr) + '\n```';
+
+    const metadata = report.json().metadata;
+    if (metadata?.gitDiff)
+      text += '\n\n# Local changes\n\n```diff\n' + metadata.gitDiff + '\n```';
+
+    return text;
+  }, [errorContext, report, result], undefined);
+
   return <div className='test-result'>
-    {result.error && <AutoChip header='Errors'>
-      <ErrorMessage key='test-result-error-message' error={result.error}></ErrorMessage>
+    {!!errors.length && <AutoChip header='Errors'>
+      {prompt && (
+        <div style={{ position: 'absolute', right: '16px', padding: '10px', zIndex: 1 }}>
+          <PromptButton prompt={prompt} />
+        </div>
+      )}
+      {errors.map((error, index) => {
+        const diff = pickDiffForError(error, diffs);
+        return <>
+          <CodeSnippet key={'test-result-error-message-' + index} code={error}/>
+          {diff && <TestScreenshotErrorView diff={diff}></TestScreenshotErrorView>}
+        </>;
+      })}
     </AutoChip>}
     {!!result.steps.length && <AutoChip header='Test Steps'>
-      {result.steps.map((step, i) => <StepTreeItem key={`step-${i}`} step={step} depth={0}></StepTreeItem>)}
+      <form className='subnav-search step-filter' onSubmit={e => e.preventDefault()}>
+        {icons.search()}
+        <input className='form-control subnav-search-input input-contrast width-full' type='search' spellCheck={false} placeholder='Filter steps' aria-label='Filter steps' value={stepFilterText} onChange={e => setStepFilterText(e.target.value)} />
+      </form>
+      {result.steps.map((step, i) => <StepTreeItem key={`step-${i}`} step={step} result={result} test={test} depth={0} filterText={stepFilterText}/>)}
     </AutoChip>}
 
-    {expected && actual && <AutoChip header={`${hasImages ? 'Image' : 'Snapshot'} mismatch`}>
-      {hasImages && <ImageDiff actual={actual} expected={expected} diff={diff}></ImageDiff>}
-      <AttachmentLink key={`expected`} attachment={expected}></AttachmentLink>
-      <AttachmentLink key={`actual`} attachment={actual}></AttachmentLink>
-      {diff && <AttachmentLink key={`diff`} attachment={diff}></AttachmentLink>}
-    </AutoChip>}
+    {diffs.map((diff, index) =>
+      <Anchor key={`diff-${index}`} id={diff.anchors}>
+        <AutoChip dataTestId='test-results-image-diff' header={`Image mismatch: ${diff.name}`} revealOnAnchorId={diff.anchors}>
+          <ImageDiffView diff={diff}/>
+        </AutoChip>
+      </Anchor>
+    )}
 
-    {!!screenshots.length && <AutoChip header='Screenshots'>
+    {!!screenshots.length && <AutoChip header='Screenshots' revealOnAnchorId={screenshotAnchors}>
       {screenshots.map((a, i) => {
-        return <div key={`screenshot-${i}`}>
-          <img src={a.path} />
-          <AttachmentLink attachment={a}></AttachmentLink>
-        </div>;
+        return <Anchor key={`screenshot-${i}`} id={`attachment-${result.attachments.indexOf(a)}`}>
+          <a href={formatUrl(a.path)}>
+            <img className='screenshot' src={formatUrl(a.path)} />
+          </a>
+          <AttachmentLink attachment={a} result={result}></AttachmentLink>
+        </Anchor>;
       })}
     </AutoChip>}
 
-    {!!traces.length && <AutoChip header='Traces'>
-      {traces.map((a, i) => <div key={`trace-${i}`}>
-        <a href={`trace/index.html?trace=${new URL(a.path!, window.location.href)}`}>
-          <img src={traceImage} style={{ width: 192, height: 117, marginLeft: 20 }} />
+    {!!traces.length && <Anchor id='attachment-trace'><AutoChip header='Traces' revealOnAnchorId='attachment-trace'>
+      {<div>
+        <a href={formatUrl(generateTraceUrl(traces))}>
+          <img className='screenshot' src={traceImage} style={{ width: 192, height: 117, marginLeft: 20 }} />
         </a>
-        <AttachmentLink attachment={a}></AttachmentLink>
-      </div>)}
-    </AutoChip>}
+        {traces.map((a, i) => <AttachmentLink key={`trace-${i}`} attachment={a} result={result} linkName={traces.length === 1 ? 'trace' : `trace-${i + 1}`}></AttachmentLink>)}
+      </div>}
+    </AutoChip></Anchor>}
 
-    {!!videos.length && <AutoChip header='Videos'>
-      {videos.map((a, i) => <div key={`video-${i}`}>
+    {!!videos.length && <Anchor id='attachment-video'><AutoChip header='Videos' revealOnAnchorId='attachment-video'>
+      {videos.map(a => <div key={a.path}>
         <video controls>
-          <source src={a.path} type={a.contentType}/>
+          <source src={formatUrl(a.path)} type={a.contentType}/>
         </video>
-        <AttachmentLink attachment={a}></AttachmentLink>
+        <AttachmentLink attachment={a} result={result}></AttachmentLink>
       </div>)}
+    </AutoChip></Anchor>}
+
+    {!!otherAttachments.size && <AutoChip header='Attachments' revealOnAnchorId={otherAttachmentAnchors} dataTestId='attachments'>
+      {[...otherAttachments].map((a, i) =>
+        <Anchor key={`attachment-link-${i}`} id={`attachment-${result.attachments.indexOf(a)}`}>
+          <AttachmentLink attachment={a} result={result} openInNewTab={a.contentType.startsWith('text/html')} />
+        </Anchor>
+      )}
     </AutoChip>}
 
-    {!!otherAttachments.size && <AutoChip header='Attachments'>
-      {[...otherAttachments].map((a, i) => <AttachmentLink key={`attachment-link-${i}`} attachment={a}></AttachmentLink>)}
-    </AutoChip>}
+    <AutoChip header={`Executed in Worker #${result.workerIndex}`} dataTestId='worker-test-list' initialExpanded={false} noInsets={true} body={() => {
+      const list = buildWorkerLists(report).get(result.workerIndex) || { tests: [], runs: [] };
+      return <TestCaseListView
+        tests={list.tests}
+        runs={list.runs}
+        projectNames={report.json().projectNames}
+        selectedTestId={test.testId}
+      />;
+    }}/>
   </div>;
 };
+
+function pickDiffForError(error: string, diffs: ImageDiff[]): ImageDiff | undefined {
+  const firstLine = error.split('\n')[0];
+  if (!firstLine.includes('toHaveScreenshot') && !firstLine.includes('toMatchSnapshot'))
+    return undefined;
+  return diffs.find(diff => error.includes(diff.name));
+}
+
+function stepMatchesFilter(step: TestStep, filterText: string): boolean {
+  return step.title.toLowerCase().includes(filterText.toLowerCase());
+}
+
+function stepChildrenMatchFilter(step: TestStep, filterText: string): boolean {
+  return step.steps.some(s => stepMatchesFilter(s, filterText) || stepChildrenMatchFilter(s, filterText));
+}
+
+function stepHasDescendantAttachments(step: TestStep): boolean {
+  return step.steps.some(s => s.attachments.length > 0 || stepHasDescendantAttachments(s));
+}
 
 const StepTreeItem: React.FC<{
+  test: TestCase;
+  result: TestResult;
   step: TestStep;
   depth: number,
-}> = ({ step, depth }) => {
-  return <TreeItem title={<span>
-    <span style={{ float: 'right' }}>{msToString(step.duration)}</span>
-    {statusIcon(step.error || step.duration === -1 ? 'failed' : 'passed')}
-    <span>{step.title}</span>
-    {step.count > 1 && <> ✕ <span className='test-result-counter'>{step.count}</span></>}
-    {step.location && <span className='test-result-path'>— {step.location.file}:{step.location.line}</span>}
-  </span>} loadChildren={step.steps.length + (step.snippet ? 1 : 0) ? () => {
-    const children = step.steps.map((s, i) => <StepTreeItem key={i} step={s} depth={depth + 1}></StepTreeItem>);
-    if (step.snippet)
-      children.unshift(<ErrorMessage key='line' error={step.snippet}></ErrorMessage>);
-    return children;
-  } : undefined} depth={depth}></TreeItem>;
-};
+  filterText?: string,
+}> = ({ test, step, result, depth, filterText }) => {
+  const searchParams = useSearchParams();
 
-const ImageDiff: React.FunctionComponent<{
- actual: TestAttachment,
- expected: TestAttachment,
- diff?: TestAttachment,
-}> = ({ actual, expected, diff }) => {
-  const [selectedTab, setSelectedTab] = React.useState<string>('actual');
-  const diffElement = React.useRef<HTMLImageElement>(null);
-  const tabs = [];
-  tabs.push({
-    id: 'actual',
-    title: 'Actual',
-    render: () => <img src={actual.path} onLoad={() => {
-      if (diffElement.current)
-        diffElement.current.style.minHeight = diffElement.current.offsetHeight + 'px';
-    }}/>
-  });
-  tabs.push({
-    id: 'expected',
-    title: 'Expected',
-    render: () => <img src={expected.path} onLoad={() => {
-      if (diffElement.current)
-        diffElement.current.style.minHeight = diffElement.current.offsetHeight + 'px';
-    }}/>
-  });
-  if (diff) {
-    tabs.push({
-      id: 'diff',
-      title: 'Diff',
-      render: () => <img src={diff.path}/>
-    });
+  let expandByDefault = false;
+  let title: React.ReactNode = <span>{step.title}</span>;
+
+  if (filterText) {
+    const matchesFilter = !!filterText && stepMatchesFilter(step, filterText);
+    const childrenMatchFilter = !!filterText && stepChildrenMatchFilter(step, filterText);
+    if (!matchesFilter && !childrenMatchFilter)
+      return null;
+    expandByDefault = childrenMatchFilter;
+    if (matchesFilter) {
+      const unmatched = step.title.toLowerCase().split(filterText.toLowerCase());
+      const parts: React.ReactNode[] = [];
+      let index = 0;
+      for (let i = 0; i < unmatched.length; i++) {
+        if (i) {
+          parts.push(<span key={i} className='step-title-highlight'>{step.title.substring(index, index + filterText.length)}</span>);
+          index += filterText.length;
+        }
+        parts.push(unmatched[i]);
+        index += unmatched[i].length;
+      }
+      title = parts;
+    }
   }
-  return <div className='vbox' data-testid='test-result-image-mismatch' ref={diffElement}>
-    <TabbedPane tabs={tabs} selectedTab={selectedTab} setSelectedTab={setSelectedTab} />
-  </div>;
+
+  return <TreeItem title={<div aria-label={step.title} className='step-title-container'>
+    {statusIcon(step.error || step.duration === -1 ? 'failed' : (step.skipped ? 'skipped' : 'passed'))}
+    <span className='step-title-text'>
+      {title}
+      {step.count > 1 && <> ✕ <span className='test-result-counter'>{step.count}</span></>}
+      {step.location && <span className='test-result-path'>— {step.location.file}:{step.location.line}</span>}
+    </span>
+    <span className='step-spacer'></span>
+    {step.attachments.length > 0 && <a
+      className='step-attachment-link'
+      title={`reveal attachment`}
+      href={formatUrl(testResultHref({ test, result, anchor: `attachment-${step.attachments[0]}` }, searchParams))}
+      onClick={evt => { evt.stopPropagation(); }}>
+      {icons.attachment()}
+    </a>}
+    {step.attachments.length === 0 && stepHasDescendantAttachments(step) && <span
+      className='step-indirect-attachment-indicator'
+      title='contains attachment'
+      aria-label='contains attachment'>
+      {icons.indirectAttachment()}
+    </span>}
+    <span className='step-duration'>{msToString(step.duration)}</span>
+  </div>} loadChildren={step.steps.length || step.snippet ? () => {
+    const snippet = step.snippet ? [<CodeSnippet testId='test-snippet' key='line' code={step.snippet} />] : [];
+    const steps = step.steps.map((s, i) => <StepTreeItem key={i} step={s} depth={depth + 1} result={result} test={test} filterText={filterText} />);
+    return snippet.concat(steps);
+  } : undefined} depth={depth} expandByDefault={expandByDefault}/>;
 };
 
-const ErrorMessage: React.FC<{
-  error: string;
-}> = ({ error }) => {
-  const html = React.useMemo(() => {
-    const config: any = {
-      bg: 'var(--color-canvas-subtle)',
-      fg: 'var(--color-fg-default)',
-    };
-    config.colors = ansiColors;
-    return new ansi2html(config).toHtml(escapeHTML(error));
-  }, [error]);
-  return <div className='test-result-error-message' dangerouslySetInnerHTML={{ __html: html || '' }}></div>;
-};
+type WorkerLists = Map<number, { tests: TestCaseSummary[], runs: number[] }>;
+const kWorkerListsSymbol = Symbol('workerLists');
 
-const ansiColors = {
-  0: '#000',
-  1: '#C00',
-  2: '#0C0',
-  3: '#C50',
-  4: '#00C',
-  5: '#C0C',
-  6: '#0CC',
-  7: '#CCC',
-  8: '#555',
-  9: '#F55',
-  10: '#5F5',
-  11: '#FF5',
-  12: '#55F',
-  13: '#F5F',
-  14: '#5FF',
-  15: '#FFF'
-};
+function buildWorkerLists(report: LoadedReport): WorkerLists {
+  let data: WorkerLists | undefined = (report as any)[kWorkerListsSymbol];
+  if (!data) {
+    const lists = new Map<number, { test: TestCaseSummary, time: number, run: number }[]>();
+    for (const file of report.json().files) {
+      for (const test of file.tests) {
+        for (let index = 0; index < test.results.length; index++) {
+          let list = lists.get(test.results[index].workerIndex);
+          if (!list) {
+            list = [];
+            lists.set(test.results[index].workerIndex, list);
+          }
+          list.push({ test, time: new Date(test.results[index].startTime).valueOf(), run: index });
+        }
+      }
+    }
 
-function escapeHTML(text: string): string {
-  return text.replace(/[&"<>]/g, c => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' }[c]!));
+    data = new Map();
+    for (const [workerIndex, list] of lists) {
+      list.sort((a, b) => a.time - b.time);
+      data.set(workerIndex, { tests: list.map(t => t.test), runs: list.map(t => t.run) });
+    }
+    (report as any)[kWorkerListsSymbol] = data;
+  }
+  return data;
 }

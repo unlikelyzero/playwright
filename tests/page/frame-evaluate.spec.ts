@@ -28,7 +28,7 @@ it('should have different execution contexts', async ({ page, server }) => {
   expect(await page.frames()[1].evaluate(() => window['FOO'])).toBe('bar');
 });
 
-it('should have correct execution contexts #smoke', async ({ page, server }) => {
+it('should have correct execution contexts @smoke', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/frames/one-frame.html');
   expect(page.frames().length).toBe(2);
   expect(await page.frames()[0].evaluate(() => document.body.textContent.trim())).toBe('');
@@ -37,13 +37,12 @@ it('should have correct execution contexts #smoke', async ({ page, server }) => 
 
 function expectContexts(pageImpl, count, browserName) {
   if (browserName === 'chromium')
-    expect(pageImpl._delegate._mainFrameSession._contextIdToContext.size).toBe(count);
+    expect(pageImpl.delegate._mainFrameSession._contextIdToContext.size).toBe(count);
   else
-    expect(pageImpl._delegate._contextIdToContext.size).toBe(count);
+    expect(pageImpl.delegate._contextIdToContext.size).toBe(count);
 }
 
-it('should dispose context on navigation', async ({ page, server, toImpl, browserName, mode, isElectron }) => {
-  it.skip(mode !== 'default');
+it('should dispose context on navigation', async ({ page, server, toImpl, browserName, isElectron }) => {
   it.skip(isElectron);
 
   await page.goto(server.PREFIX + '/frames/one-frame.html');
@@ -53,8 +52,7 @@ it('should dispose context on navigation', async ({ page, server, toImpl, browse
   expectContexts(toImpl(page), 2, browserName);
 });
 
-it('should dispose context on cross-origin navigation', async ({ page, server, toImpl, browserName, mode, isElectron }) => {
-  it.skip(mode !== 'default');
+it('should dispose context on cross-origin navigation', async ({ page, server, toImpl, browserName, isElectron }) => {
   it.skip(isElectron);
 
   await page.goto(server.PREFIX + '/frames/one-frame.html');
@@ -97,9 +95,8 @@ it('should allow cross-frame element handles', async ({ page, server }) => {
   expect(result.trim()).toBe('<div>Hi, I\'m frame</div>');
 });
 
-it('should not allow cross-frame element handles when frames do not script each other', async ({ page, server, isElectron, isAndroid }) => {
+it('should not allow cross-frame element handles when frames do not script each other', async ({ page, server, isAndroid }) => {
   it.skip(isAndroid, 'No cross-process on Android');
-  it.fixme(isElectron);
 
   await page.goto(server.EMPTY_PAGE);
   const frame = await attachFrame(page, 'frame1', server.CROSS_PROCESS_PREFIX + '/empty.html');
@@ -136,23 +133,16 @@ it('should be isolated between frames', async ({ page, server }) => {
 });
 
 it('should work in iframes that failed initial navigation', async ({ page, browserName }) => {
-  it.fail(browserName === 'chromium');
-  it.fixme(browserName === 'firefox');
-
-  // - Firefox does not report domcontentloaded for the iframe.
-  // - Chromium and Firefox report empty url.
-  // - Chromium does not report main/utility worlds for the iframe.
   await page.setContent(`
     <meta http-equiv="Content-Security-Policy" content="script-src 'none';">
     <iframe src='javascript:""'></iframe>
   `, { waitUntil: 'domcontentloaded' });
-  // Note: Chromium/Firefox never report 'load' event for the iframe.
   await page.evaluate(() => {
     const iframe = document.querySelector('iframe');
     const div = iframe.contentDocument.createElement('div');
     iframe.contentDocument.body.appendChild(div);
   });
-  expect(page.frames()[1].url()).toBe('about:blank');
+  expect(page.frames()[1].url()).toBe(browserName === 'webkit' ? 'about:blank' : '');
   // Main world should work.
   expect(await page.frames()[1].evaluate(() => window.location.href)).toBe('about:blank');
   // Utility world should work.
@@ -160,8 +150,6 @@ it('should work in iframes that failed initial navigation', async ({ page, brows
 });
 
 it('should work in iframes that interrupted initial javascript url navigation', async ({ page, server, browserName }) => {
-  it.fixme(browserName === 'chromium');
-
   // Chromium does not report isolated world for the iframe.
   await page.goto(server.EMPTY_PAGE);
   await page.evaluate(() => {
@@ -184,4 +172,3 @@ it('evaluateHandle should work', async ({ page, server }) => {
   const windowHandle = await mainFrame.evaluateHandle(() => window);
   expect(windowHandle).toBeTruthy();
 });
-

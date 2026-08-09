@@ -14,21 +14,23 @@
  * limitations under the License.
  */
 
-import * as types from './types';
+import { isLocalHostname, kMaxCookieExpiresDateInSeconds } from './network';
 
-class Cookie {
-  private _raw: types.NetworkCookie;
-  constructor(data: types.NetworkCookie) {
+import type * as channels from './channels';
+
+export class Cookie {
+  private _raw: channels.NetworkCookie;
+  constructor(data: channels.NetworkCookie) {
     this._raw = data;
   }
 
-  name(): string {
+  _name(): string {
     return this._raw.name;
   }
 
   // https://datatracker.ietf.org/doc/html/rfc6265#section-5.4
   matches(url: URL): boolean {
-    if (this._raw.secure && url.protocol !== 'https:')
+    if (this._raw.secure && (url.protocol !== 'https:' && !isLocalHostname(url.hostname)))
       return false;
     if (!domainMatches(url.hostname, this._raw.domain))
       return false;
@@ -37,21 +39,21 @@ class Cookie {
     return true;
   }
 
-  equals(other: Cookie) {
+  _equals(other: Cookie) {
     return this._raw.name === other._raw.name &&
       this._raw.domain === other._raw.domain &&
       this._raw.path === other._raw.path;
   }
 
-  networkCookie(): types.NetworkCookie {
+  _networkCookie(): channels.NetworkCookie {
     return this._raw;
   }
 
-  updateExpiresFrom(other: Cookie) {
+  _updateExpiresFrom(other: Cookie) {
     this._raw.expires = other._raw.expires;
   }
 
-  expired() {
+  _expired() {
     if (this._raw.expires === -1)
       return false;
     return this._raw.expires * 1000 < Date.now();
@@ -61,44 +63,40 @@ class Cookie {
 export class CookieStore {
   private readonly _nameToCookies: Map<string, Set<Cookie>> = new Map();
 
-  addCookies(cookies: types.NetworkCookie[]) {
+  addCookies(cookies: channels.NetworkCookie[]) {
     for (const cookie of cookies)
       this._addCookie(new Cookie(cookie));
   }
 
-  cookies(url: URL): types.NetworkCookie[] {
+  cookies(url: URL): channels.NetworkCookie[] {
     const result = [];
     for (const cookie of this._cookiesIterator()) {
       if (cookie.matches(url))
-        result.push(cookie.networkCookie());
+        result.push(cookie._networkCookie());
     }
     return result;
   }
 
-  allCookies(): types.NetworkCookie[] {
+  allCookies(): channels.NetworkCookie[] {
     const result = [];
     for (const cookie of this._cookiesIterator())
-      result.push(cookie.networkCookie());
+      result.push(cookie._networkCookie());
     return result;
   }
 
   private _addCookie(cookie: Cookie) {
-    if (cookie.expired())
-      return;
-    let set = this._nameToCookies.get(cookie.name());
+    let set = this._nameToCookies.get(cookie._name());
     if (!set) {
       set = new Set();
-      this._nameToCookies.set(cookie.name(), set);
+      this._nameToCookies.set(cookie._name(), set);
     }
-    CookieStore.pruneExpired(set);
     // https://datatracker.ietf.org/doc/html/rfc6265#section-5.3
     for (const other of set) {
-      if (other.equals(cookie)) {
-        cookie.updateExpiresFrom(other);
+      if (other._equals(cookie))
         set.delete(other);
-      }
     }
     set.add(cookie);
+    CookieStore.pruneExpired(set);
   }
 
   private *_cookiesIterator(): IterableIterator<Cookie> {
@@ -113,10 +111,101 @@ export class CookieStore {
 
   private static pruneExpired(cookies: Set<Cookie>) {
     for (const cookie of cookies) {
-      if (cookie.expired())
+      if (cookie._expired())
         cookies.delete(cookie);
     }
   }
+}
+
+type RawCookie = {
+  name: string,
+  value: string,
+  domain?: string,
+  path?: string,
+  expires?: number,
+  httpOnly?: boolean,
+  secure?: boolean,
+  sameSite?: 'Strict' | 'Lax' | 'None',
+};
+
+export function parseRawCookie(header: string): RawCookie | null {
+  const pairs = header.split(';').filter(s => s.trim().length > 0).map(p => {
+    let key = '';
+    let value = '';
+    const separatorPos = p.indexOf('=');
+    if (separatorPos === -1) {
+      // If only a key is specified, the value is left undefined.
+      key = p.trim();
+    } else {
+      // Otherwise we assume that the key is the element before the first `=`
+      key = p.slice(0, separatorPos).trim();
+      // And the value is the rest of the string.
+      value = p.slice(separatorPos + 1).trim();
+    }
+    return [key, value];
+  });
+  if (!pairs.length)
+    return null;
+  const [name, value] = pairs[0];
+  const cookie: RawCookie = {
+    name,
+    value,
+  };
+  for (let i = 1; i < pairs.length; i++) {
+    const [name, value] = pairs[i];
+    switch (name.toLowerCase()) {
+      case 'expires':
+        const expiresMs = (+new Date(value));
+        // https://datatracker.ietf.org/doc/html/rfc6265#section-5.2.1
+        if (isFinite(expiresMs)) {
+          if (expiresMs <= 0)
+            cookie.expires = 0;
+          else
+            cookie.expires = Math.min(expiresMs / 1000, kMaxCookieExpiresDateInSeconds);
+        }
+        break;
+      case 'max-age':
+        const maxAgeSec = parseInt(value, 10);
+        if (isFinite(maxAgeSec)) {
+          // From https://datatracker.ietf.org/doc/html/rfc6265#section-5.2.2
+          // If delta-seconds is less than or equal to zero (0), let expiry-time
+          // be the earliest representable date and time.
+          if (maxAgeSec <= 0)
+            cookie.expires = 0;
+          else
+            cookie.expires = Math.min(Date.now() / 1000 + maxAgeSec, kMaxCookieExpiresDateInSeconds);
+        }
+        break;
+      case 'domain':
+        cookie.domain = value.toLocaleLowerCase() || '';
+        if (cookie.domain && !cookie.domain.startsWith('.') && cookie.domain.includes('.'))
+          cookie.domain = '.' + cookie.domain;
+        break;
+      case 'path':
+        cookie.path = value || '';
+        break;
+      case 'secure':
+        cookie.secure = true;
+        break;
+      case 'httponly':
+        cookie.httpOnly = true;
+        break;
+      case 'samesite':
+        switch (value.toLowerCase()) {
+          case 'none':
+            cookie.sameSite = 'None';
+            break;
+          case 'lax':
+            cookie.sameSite = 'Lax';
+            break;
+          case 'strict':
+            cookie.sameSite = 'Strict';
+            break;
+        }
+        break;
+    }
+  }
+  return cookie;
 }
 
 export function domainMatches(value: string, domain: string): boolean {

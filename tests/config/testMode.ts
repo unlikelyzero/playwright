@@ -14,40 +14,29 @@
  * limitations under the License.
  */
 
-import { GridClient } from '../../packages/playwright-core/lib/grid/gridClient';
-import { start } from '../../packages/playwright-core/lib/outofprocess';
-import { Playwright } from '../../packages/playwright-core/lib/client/playwright';
+import { oop, client } from '../../packages/playwright-core/lib/coreBundle';
 
-export type TestModeName = 'default' | 'driver' | 'service';
+export type TestModeName = 'default' | 'driver';
+
+const { start } = oop;
 
 interface TestMode {
-  setup(): Promise<Playwright>;
+  setup(): Promise<client.Playwright>;
   teardown(): Promise<void>;
 }
 
 export class DriverTestMode implements TestMode {
-  private _impl: { playwright: Playwright; stop: () => Promise<void>; };
+  private _impl: { playwright: client.Playwright; stop: () => Promise<void>; };
 
   async setup() {
-    this._impl = await start();
+    this._impl = await start({
+      NODE_OPTIONS: undefined,  // Hide driver process while debugging.
+    });
     return this._impl.playwright;
   }
 
   async teardown() {
     await this._impl.stop();
-  }
-}
-
-export class ServiceTestMode implements TestMode {
-  private _gridClient: GridClient;
-
-  async setup() {
-    this._gridClient = await GridClient.connect('http://localhost:3333');
-    return this._gridClient.playwright();
-  }
-
-  async teardown() {
-    await this._gridClient.close();
   }
 }
 

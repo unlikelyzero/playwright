@@ -14,19 +14,61 @@
  * limitations under the License.
  */
 
-import * as channels from '../protocol/channels';
 import { ChannelOwner } from './channelOwner';
+import { kNoTimeout } from './timeoutSettings';
+
+import type { Size } from './types';
+import type * as channels from './channels';
+
+type DeviceDescriptor = {
+  userAgent: string,
+  viewport: Size,
+  deviceScaleFactor: number,
+  isMobile: boolean,
+  hasTouch: boolean,
+  defaultBrowserType: 'chromium' | 'firefox' | 'webkit'
+};
+type Devices = { [name: string]: DeviceDescriptor };
 
 export class LocalUtils extends ChannelOwner<channels.LocalUtilsChannel> {
-  static from(channel: channels.LocalUtilsChannel): LocalUtils {
-    return (channel as any)._object;
-  }
+  readonly devices: Devices;
 
   constructor(parent: ChannelOwner, type: string, guid: string, initializer: channels.LocalUtilsInitializer) {
     super(parent, type, guid, initializer);
+    this.devices = {};
+    for (const { name, descriptor } of initializer.deviceDescriptors)
+      this.devices[name] = descriptor;
   }
 
-  async zip(zipFile: string, entries: channels.NameValue[]): Promise<void> {
-    await this._channel.zip({ zipFile, entries });
+  async zip(params: channels.LocalUtilsZipParams): Promise<void> {
+    return await this._channel.zip(params, kNoTimeout);
+  }
+
+  async harOpen(params: channels.LocalUtilsHarOpenParams): Promise<channels.LocalUtilsHarOpenResult> {
+    return await this._channel.harOpen(params, kNoTimeout);
+  }
+
+  async harLookup(params: channels.LocalUtilsHarLookupParams): Promise<channels.LocalUtilsHarLookupResult> {
+    return await this._channel.harLookup(params, kNoTimeout);
+  }
+
+  async harClose(params: channels.LocalUtilsHarCloseParams): Promise<void> {
+    return await this._channel.harClose(params, kNoTimeout);
+  }
+
+  async harUnzip(params: channels.LocalUtilsHarUnzipParams): Promise<void> {
+    return await this._channel.harUnzip(params, kNoTimeout);
+  }
+
+  async tracingStarted(params: channels.LocalUtilsTracingStartedParams): Promise<channels.LocalUtilsTracingStartedResult> {
+    return await this._channel.tracingStarted(params, kNoTimeout);
+  }
+
+  async traceDiscarded(params: channels.LocalUtilsTraceDiscardedParams): Promise<void> {
+    return await this._channel.traceDiscarded(params, kNoTimeout);
+  }
+
+  async addStackToTracingNoReply(params: channels.LocalUtilsAddStackToTracingNoReplyParams): Promise<void> {
+    return await this._channel.addStackToTracingNoReply(params, kNoTimeout);
   }
 }

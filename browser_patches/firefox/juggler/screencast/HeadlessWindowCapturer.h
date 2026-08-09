@@ -22,15 +22,14 @@ class HeadlessWidget;
 
 class HeadlessWindowCapturer : public webrtc::VideoCaptureModuleEx {
  public:
-  static rtc::scoped_refptr<webrtc::VideoCaptureModuleEx> Create(mozilla::widget::HeadlessWidget*);
+  static webrtc::scoped_refptr<webrtc::VideoCaptureModuleEx> Create(mozilla::widget::HeadlessWidget*);
 
   void RegisterCaptureDataCallback(
-      rtc::VideoSinkInterface<webrtc::VideoFrame>* dataCallback) override;
-  void DeRegisterCaptureDataCallback(
-      rtc::VideoSinkInterface<webrtc::VideoFrame>* dataCallback) override;
-  int32_t StopCaptureIfAllClientsClose() override;
+      webrtc::VideoSinkInterface<webrtc::VideoFrame>* dataCallback) override;
+  void DeRegisterCaptureDataCallback() override;
 
   void RegisterRawFrameCallback(webrtc::RawFrameCallback* rawFrameCallback) override;
+  void RegisterCaptureDataCallback(webrtc::RawVideoSinkInterface* dataCallback) override;
   void DeRegisterRawFrameCallback(webrtc::RawFrameCallback* rawFrameCallback) override;
 
   int32_t SetCaptureRotation(webrtc::VideoRotation) override { return -1; }
@@ -55,9 +54,9 @@ class HeadlessWindowCapturer : public webrtc::VideoCaptureModuleEx {
  private:
   void NotifyFrameCaptured(const webrtc::VideoFrame& frame);
 
-  mozilla::widget::HeadlessWidget* mWindow = nullptr;
-  rtc::RecursiveCriticalSection _callBackCs;
-  std::set<rtc::VideoSinkInterface<webrtc::VideoFrame>*> _dataCallBacks;
+  RefPtr<mozilla::widget::HeadlessWidget> mWindow;
+  webrtc::RecursiveCriticalSection _callBackCs;
+  std::set<webrtc::VideoSinkInterface<webrtc::VideoFrame>*> _dataCallBacks;
   std::set<webrtc::RawFrameCallback*> _rawFrameCallbacks;
 };
 

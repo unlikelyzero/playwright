@@ -44,6 +44,8 @@ HINSTANCE hInst;
 POINT s_windowPosition = { 100, 100 };
 SIZE s_windowSize = { 500, 200 };
 
+bool s_headless;
+
 namespace WebCore {
 float deviceScaleFactorForWindow(HWND);
 }
@@ -60,14 +62,6 @@ void computeFullDesktopFrame()
     s_windowPosition.y = 0;
     s_windowSize.cx = scaleFactor * (desktop.right - desktop.left);
     s_windowSize.cy = scaleFactor * (desktop.bottom - desktop.top);
-}
-
-BOOL WINAPI DllMain(HINSTANCE dllInstance, DWORD reason, LPVOID)
-{
-    if (reason == DLL_PROCESS_ATTACH)
-        hInst = dllInstance;
-
-    return TRUE;
 }
 
 bool getAppDataFolder(_bstr_t& directory)

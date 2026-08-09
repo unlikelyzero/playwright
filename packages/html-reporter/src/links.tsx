@@ -14,68 +14,220 @@
   limitations under the License.
 */
 
-import type { TestAttachment } from '@playwright/test/src/reporters/html';
+import type { TestAttachment, TestCase, TestCaseSummary, TestResult, TestResultSummary } from './types';
 import * as React from 'react';
 import * as icons from './icons';
-import { TreeItem } from './treeItem';
+import { CopyToClipboard } from './copyToClipboard';
 import './links.css';
+import { linkifyText } from '@web/renderUtils';
+import { clsx, useFlash } from '@web/uiUtils';
+import { trace } from './icons';
+import { Expandable } from './expandable';
+import { Label } from './labels';
+import { filterWithQuery } from './filter';
+import { formatUrl } from './utils';
 
-export function navigate(href: string) {
+export function navigate(href: string | URL) {
   window.history.pushState({}, '', href);
   const navEvent = new PopStateEvent('popstate');
   window.dispatchEvent(navEvent);
 }
 
 export const Route: React.FunctionComponent<{
-  params: string,
+  predicate: (params: URLSearchParams) => boolean,
   children: any
-}> = ({ params, children }) => {
-  const initialParams = [...new URLSearchParams(window.location.hash.slice(1)).keys()].join('&');
-  const [currentParams, setCurrentParam] = React.useState(initialParams);
-  React.useEffect(() => {
-    const listener = () => {
-      const newParams = [...new URLSearchParams(window.location.hash.slice(1)).keys()].join('&');
-      setCurrentParam(newParams);
-    };
-    window.addEventListener('popstate', listener);
-    return () => window.removeEventListener('popstate', listener);
-  }, []);
-  return currentParams === params ? children : null;
+}> = ({ predicate, children }) => {
+  return predicate(useSearchParams()) ? children : null;
 };
 
-export const Link: React.FunctionComponent<{
-  href: string,
+type LinkProps = React.PropsWithChildren<{
+  href?: string,
+  click?: string,
+  ctrlClick?: string,
   className?: string,
   title?: string,
-  children: any,
-}> = ({ href, className, children, title }) => {
-  return <a style={{ textDecoration: 'none', color: 'var(--color-fg-default)' }} className={`${className || ''}`} href={href} title={title}>{children}</a>;
+}>;
+
+export const Link: React.FunctionComponent<LinkProps> = ({ click, ctrlClick, children, ...rest }) => {
+  return <a {...rest} style={{ textDecoration: 'none', color: 'var(--color-fg-default)', cursor: 'pointer' }} onClick={e => {
+    if (click) {
+      e.preventDefault();
+      navigate(formatUrl(e.metaKey || e.ctrlKey ? ctrlClick || click : click));
+    }
+  }}>{children}</a>;
 };
+
+export const LinkBadge: React.FunctionComponent<LinkProps & { dim?: boolean }> = ({ className, ...props }) => <Link {...props} className={clsx('link-badge', props.dim && 'link-badge-dim', className)} />;
 
 export const ProjectLink: React.FunctionComponent<{
   projectNames: string[],
   projectName: string,
-}> = ({ projectNames, projectName }) => {
-  const encoded = encodeURIComponent(projectName);
-  const value = projectName === encoded ? projectName : `"${encoded.replace(/%22/g, '%5C%22')}"`;
-  return <Link href={`#?q=p:${value}`}>
-    <span className={'label label-color-' + (projectNames.indexOf(projectName) % 6)}>
-      {projectName}
-    </span>
+}> = ({  projectNames, projectName }) => {
+  const searchParams = new URLSearchParams(useSearchParams());
+  if (searchParams.has('testId'))
+    searchParams.delete('speedboard');
+  searchParams.delete('testId');
+  return <Link click={filterWithQuery(searchParams, `p:${projectName}`, false)} ctrlClick={filterWithQuery(searchParams, `p:${projectName}`, true)}>
+    <Label label={projectName} colorIndex={projectNames.indexOf(projectName) % 6} />
   </Link>;
 };
 
 export const AttachmentLink: React.FunctionComponent<{
   attachment: TestAttachment,
+  result: TestResult,
   href?: string,
-}> = ({ attachment, href }) => {
-  return <TreeItem title={<span>
-    {attachment.contentType === kMissingContentType ? icons.warning() : icons.attachment()}
-    {attachment.path && <a href={href || attachment.path} target='_blank'>{attachment.name}</a>}
-    {attachment.body && <span>{attachment.name}</span>}
-  </span>} loadChildren={attachment.body ? () => {
-    return [<div className='attachment-body'>{attachment.body}</div>];
-  } : undefined} depth={0}></TreeItem>;
+  linkName?: string,
+  openInNewTab?: boolean,
+}> = ({ attachment, result, href, linkName, openInNewTab }) => {
+  const [flash, triggerFlash] = useFlash();
+  useAnchor('attachment-' + result.attachments.indexOf(attachment), triggerFlash);
+
+  const summaryContent = (
+    <span>
+      {attachment.contentType === kMissingContentType ? icons.warning() : icons.attachment()}
+      {attachment.path && (
+        openInNewTab
+          ? <a href={formatUrl(href || attachment.path)} target='_blank' rel='noreferrer'>{linkName || attachment.name}</a>
+          : <a href={formatUrl(href || attachment.path)} download={downloadFileNameForAttachment(attachment)}>{linkName || attachment.name}</a>
+      )}
+      {!attachment.path && (
+        openInNewTab
+          ? (
+            <a
+              href={URL.createObjectURL(new Blob([attachment.body!], { type: attachment.contentType }))}
+              target='_blank' rel='noreferrer'
+              onClick={e => e.stopPropagation() /* dont expand the details */}
+            >
+              {attachment.name}
+            </a>
+          )
+          : <span>{linkifyText(attachment.name)}</span>
+      )}
+    </span>
+  );
+
+  if (!attachment.body) {
+    return (
+      <div
+        style={{ lineHeight: '32px', whiteSpace: 'nowrap', paddingLeft: 4 }}
+        className={clsx(flash && 'attachment-flash')}
+      >
+        <span style={{ visibility: 'hidden' }}>{icons.rightArrow()}</span>
+        {summaryContent}
+      </div>
+    );
+  }
+
+  return (
+    <Expandable
+      style={{ lineHeight: '32px' }}
+      className={clsx(flash && 'attachment-flash')}
+      summary={summaryContent}
+    >
+      <div className='attachment-body'>
+        <CopyToClipboard value={attachment.body!}/>
+        {linkifyText(attachment.body!)}
+      </div>
+    </Expandable>
+  );
 };
 
+export const TraceLink: React.FC<{ test: TestCaseSummary, run?: number, trailingSeparator?: boolean, dim?: boolean }> = ({ test, run, trailingSeparator, dim }) => {
+  const resultsToCheck = run !== undefined && test.results[run] ? [test.results[run]] : test.results;
+  const firstTraces = resultsToCheck.map(result => result.attachments.filter(attachment => attachment.name === 'trace')).filter(traces => traces.length > 0)[0];
+  if (!firstTraces)
+    return undefined;
+
+  return (
+    <>
+      <LinkBadge
+        href={formatUrl(generateTraceUrl(firstTraces))}
+        title='View Trace'
+        className='button trace-link'
+        dim={dim}>
+        {trace()}
+        <span>View Trace</span>
+      </LinkBadge>
+      {trailingSeparator && <div className='trace-link-separator'>|</div>}
+    </>
+  );
+};
+
+const SearchParamsContext = React.createContext<URLSearchParams>(new URLSearchParams(window.location.hash.slice(1)));
+
+// Note: make sure you are not mutating the returned URLSearchParams object.
+export function useSearchParams(): URLSearchParams {
+  return React.useContext(SearchParamsContext);
+}
+
+export const SearchParamsProvider: React.FunctionComponent<React.PropsWithChildren> = ({ children }) => {
+  const [searchParams, setSearchParams] = React.useState<URLSearchParams>(new URLSearchParams(window.location.hash.slice(1)));
+
+  React.useEffect(() => {
+    const listener = () => setSearchParams(new URLSearchParams(window.location.hash.slice(1)));
+    window.addEventListener('popstate', listener);
+    return () => window.removeEventListener('popstate', listener);
+  }, []);
+
+  return <SearchParamsContext.Provider value={searchParams}>{children}</SearchParamsContext.Provider>;
+};
+
+function downloadFileNameForAttachment(attachment: TestAttachment): string {
+  if (attachment.name.includes('.') || !attachment.path)
+    return attachment.name;
+  const firstDotIndex = attachment.path.indexOf('.');
+  if (firstDotIndex === -1)
+    return attachment.name;
+  return attachment.name + attachment.path.slice(firstDotIndex, attachment.path.length);
+}
+
+export function generateTraceUrl(traces: TestAttachment[]) {
+  return `trace/index.html?${traces.map((a, i) => `trace=${new URL(a.path!, window.location.href)}`).join('&')}`;
+}
+
 const kMissingContentType = 'x-playwright/missing';
+
+export type AnchorID = string | string[] | ((id: string) => boolean) | undefined;
+
+export function useAnchor(id: AnchorID, onReveal: React.EffectCallback) {
+  const searchParams = useSearchParams();
+  const isAnchored = useIsAnchored(id);
+  React.useEffect(() => {
+    if (isAnchored)
+      return onReveal();
+  }, [isAnchored, onReveal, searchParams]);
+}
+
+export function useIsAnchored(id: AnchorID) {
+  const anchor = useSearchParams().get('anchor');
+  if (anchor === null)
+    return false;
+  if (typeof id === 'undefined')
+    return false;
+  if (typeof id === 'string')
+    return id === anchor;
+  if (Array.isArray(id))
+    return id.includes(anchor);
+  return id(anchor);
+}
+
+export function Anchor({ id, children }: React.PropsWithChildren<{ id: AnchorID }>) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  const onAnchorReveal = React.useCallback(() => {
+    ref.current?.scrollIntoView({ block: 'start', inline: 'start' });
+  }, []);
+  useAnchor(id, onAnchorReveal);
+
+  return <div ref={ref}>{children}</div>;
+}
+
+export function testResultHref({ test, result, anchor }: { test?: TestCase | TestCaseSummary, result?: TestResult | TestResultSummary, anchor?: string }, searchParams: URLSearchParams) {
+  const params = new URLSearchParams(searchParams);
+  if (test)
+    params.set('testId', test.testId);
+  if (test && result)
+    params.set('run', '' + test.results.indexOf(result as any));
+  if (anchor)
+    params.set('anchor', anchor);
+  return `#?` + params;
+}

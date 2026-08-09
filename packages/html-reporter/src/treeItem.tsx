@@ -17,24 +17,28 @@
 import * as React from 'react';
 import './treeItem.css';
 import * as icons from './icons';
+import { clsx } from '@web/uiUtils';
 
 export const TreeItem: React.FunctionComponent<{
-  title: JSX.Element,
-  loadChildren?: () => JSX.Element[],
+  title: React.JSX.Element,
+  loadChildren?: () => React.JSX.Element[],
   onClick?: () => void,
   expandByDefault?: boolean,
   depth: number,
-  selected?: boolean
-}> = ({ title, loadChildren, onClick, expandByDefault, depth, selected }) => {
+  style?:  React.CSSProperties,
+  flash?: boolean
+}> = ({ title, loadChildren, onClick, expandByDefault, depth, style, flash }) => {
   const [expanded, setExpanded] = React.useState(expandByDefault || false);
-  const className = selected ? 'tree-item-title selected' : 'tree-item-title';
-  return <div className={'tree-item'}>
-    <span className={className} style={{ whiteSpace: 'nowrap', paddingLeft: depth * 22 + 4 }} onClick={() => { onClick?.(); setExpanded(!expanded); }} >
+  React.useEffect(() => {
+    setExpanded(expandByDefault || false);
+  }, [expandByDefault]);
+  return <div role='treeitem' className={clsx('tree-item', flash && 'yellow-flash')} style={style}>
+    <div className='tree-item-title' style={{ paddingLeft: depth * 22 + 4 }} onClick={() => { onClick?.(); setExpanded(!expanded); }} >
       {loadChildren && !!expanded && icons.downArrow()}
       {loadChildren && !expanded && icons.rightArrow()}
       {!loadChildren && <span style={{ visibility: 'hidden' }}>{icons.rightArrow()}</span>}
       {title}
-    </span>
+    </div>
     {expanded && loadChildren?.()}
   </div>;
 };

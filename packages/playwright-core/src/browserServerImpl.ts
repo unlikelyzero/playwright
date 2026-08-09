@@ -1,7 +1,7 @@
 /**
  * Copyright (c) Microsoft Corporation.
  *
- * Licensed under the Apache License, Version 2.0 (the 'License");
+ * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
@@ -14,26 +14,22 @@
  * limitations under the License.
  */
 
-import { LaunchServerOptions, Logger } from './client/types';
-import { Browser } from './server/browser';
-import { EventEmitter } from 'ws';
-import { Dispatcher, DispatcherConnection, DispatcherScope, Root } from './dispatchers/dispatcher';
-import { BrowserContextDispatcher } from './dispatchers/browserContextDispatcher';
-import * as channels from './protocol/channels';
-import { BrowserServerLauncher, BrowserServer } from './client/browserType';
-import { envObjectToArray } from './client/clientHelper';
-import { createGuid } from './utils/utils';
-import { SelectorsDispatcher } from './dispatchers/selectorsDispatcher';
-import { Selectors } from './server/selectors';
-import { ProtocolLogger } from './server/types';
-import { CallMetadata, internalCallMetadata } from './server/instrumentation';
-import { createPlaywright, Playwright } from './server/playwright';
-import { PlaywrightDispatcher } from './dispatchers/playwrightDispatcher';
-import { PlaywrightServer, PlaywrightServerDelegate } from './remote/playwrightServer';
-import { BrowserContext } from './server/browserContext';
-import { CRBrowser } from './server/chromium/crBrowser';
-import { CDPSessionDispatcher } from './dispatchers/cdpSessionDispatcher';
-import { PageDispatcher } from './dispatchers/pageDispatcher';
+import EventEmitter from 'events';
+
+import { createGuid } from '@utils/crypto';
+import { isUnderTest } from '@utils/debug';
+import { rewriteErrorMessage } from '@utils/stackTrace';
+import { DEFAULT_PLAYWRIGHT_LAUNCH_TIMEOUT } from '@isomorphic/time';
+import * as validatorPrimitives from '@protocol/validatorPrimitives';
+import { PlaywrightServer } from './remote/playwrightServer';
+import { helper } from './server/helper';
+import { createPlaywright } from './server/playwright';
+import { ProgressController } from './server/progress';
+
+import type { BrowserServer, BrowserServerLauncher } from './client/browserType';
+import type { LaunchServerOptions, Logger } from './client/types';
+import type { ProtocolLogger } from './server/types';
+import type { Browser } from './server/browser';
 
 export class BrowserServerLauncherImpl implements BrowserServerLauncher {
   private _browserName: 'chromium' | 'firefox' | 'webkit';
@@ -42,118 +38,66 @@ export class BrowserServerLauncherImpl implements BrowserServerLauncher {
     this._browserName = browserName;
   }
 
-  async launchServer(options: LaunchServerOptions = {}): Promise<BrowserServer> {
-    const playwright = createPlaywright('javascript');
+  async launchServer(options: LaunchServerOptions & { _sharedBrowser?: boolean, _userDataDir?: string } = {}): Promise<BrowserServer> {
+    const playwright = createPlaywright({ sdkLanguage: 'javascript', isServer: true });
     // 1. Pre-launch the browser
-    const browser = await playwright[this._browserName].launch(internalCallMetadata(), {
+    const metadata = { id: '', startTime: 0, endTime: 0, type: 'Internal', method: '', params: {}, log: [], internal: true };
+    const validatorContext = {
+      tChannelImpl: (names: '*' | string[], arg: any, path: string) => {
+        throw new validatorPrimitives.ValidationError(`${path}: channels are not expected in launchServer`);
+      },
+      binary: 'buffer',
+      isUnderTest,
+    } satisfies validatorPrimitives.ValidatorContext;
+    let launchOptions = {
       ...options,
       ignoreDefaultArgs: Array.isArray(options.ignoreDefaultArgs) ? options.ignoreDefaultArgs : undefined,
       ignoreAllDefaultArgs: !!options.ignoreDefaultArgs && !Array.isArray(options.ignoreDefaultArgs),
       env: options.env ? envObjectToArray(options.env) : undefined,
-    }, toProtocolLogger(options.logger));
+      timeout: options.timeout ?? DEFAULT_PLAYWRIGHT_LAUNCH_TIMEOUT,
+    };
 
-    let path = `/${createGuid()}`;
-    if (options.wsPath)
-      path = options.wsPath.startsWith('/') ? options.wsPath : `/${options.wsPath}`;
+    let browser: Browser;
+    try {
+      const controller = new ProgressController(metadata);
+      browser = await controller.run(async progress => {
+        if (options._userDataDir !== undefined) {
+          const validator = validatorPrimitives.scheme['BrowserTypeLaunchPersistentContextParams'];
+          launchOptions = validator({ ...launchOptions, userDataDir: options._userDataDir }, '', validatorContext);
+          const context = await playwright[this._browserName].launchPersistentContext(progress, options._userDataDir, launchOptions);
+          return context._browser;
+        } else {
+          const validator = validatorPrimitives.scheme['BrowserTypeLaunchParams'];
+          launchOptions = validator(launchOptions, '', validatorContext);
+          return await playwright[this._browserName].launch(progress, launchOptions, toProtocolLogger(options.logger));
+        }
+      });
+    } catch (e) {
+      const log = helper.formatBrowserLogs(metadata.log);
+      rewriteErrorMessage(e, `${e.message} Failed to launch browser.${log}`);
+      throw e;
+    }
+
+    const path = options.wsPath ? (options.wsPath.startsWith('/') ? options.wsPath : `/${options.wsPath}`) : `/${createGuid()}`;
 
     // 2. Start the server
-    const delegate: PlaywrightServerDelegate = {
-      path,
-      allowMultipleClients: true,
-      onClose: () => {},
-      onConnect: this._onConnect.bind(this, playwright, browser),
-    };
-    const server = new PlaywrightServer(delegate);
-    const wsEndpoint = await server.listen(options.port);
+    const server = new PlaywrightServer({ mode: options._sharedBrowser ? 'launchServerShared' : 'launchServer', path, maxConnections: Infinity, preLaunchedBrowser: browser });
+    const wsEndpoint = await server.listen(options.port, options.host);
 
     // 3. Return the BrowserServer interface
     const browserServer = new EventEmitter() as (BrowserServer & EventEmitter);
     browserServer.process = () => browser.options.browserProcess.process!;
     browserServer.wsEndpoint = () => wsEndpoint;
     browserServer.close = () => browser.options.browserProcess.close();
+    browserServer[Symbol.asyncDispose] = browserServer.close;
     browserServer.kill = () => browser.options.browserProcess.kill();
     (browserServer as any)._disconnectForTest = () => server.close();
-    browser.options.browserProcess.onclose = async (exitCode, signal) => {
+    (browserServer as any)._userDataDirForTest = (browser as any)._userDataDirForTest;
+    browser.options.browserProcess.onclose = (exitCode, signal) => {
       server.close();
       browserServer.emit('close', exitCode, signal);
     };
     return browserServer;
-  }
-
-  private async _onConnect(playwright: Playwright, browser: Browser, connection: DispatcherConnection, forceDisconnect: () => void) {
-    let browserDispatcher: ConnectedBrowserDispatcher | undefined;
-    new Root(connection, async (scope: DispatcherScope): Promise<PlaywrightDispatcher> => {
-      const selectors = new Selectors();
-      const selectorsDispatcher = new SelectorsDispatcher(scope, selectors);
-      browserDispatcher = new ConnectedBrowserDispatcher(scope, browser, selectors);
-      browser.on(Browser.Events.Disconnected, () => {
-        // Underlying browser did close for some reason - force disconnect the client.
-        forceDisconnect();
-      });
-      return new PlaywrightDispatcher(scope, playwright, selectorsDispatcher, browserDispatcher);
-    });
-    return () => {
-      // Cleanup contexts upon disconnect.
-      browserDispatcher?.cleanupContexts().catch(e => {});
-    };
-  }
-}
-
-// This class implements multiplexing browser dispatchers over a single Browser instance.
-class ConnectedBrowserDispatcher extends Dispatcher<Browser, channels.BrowserChannel> implements channels.BrowserChannel {
-  _type_Browser = true;
-  private _contexts = new Set<BrowserContext>();
-  private _selectors: Selectors;
-
-  constructor(scope: DispatcherScope, browser: Browser, selectors: Selectors) {
-    super(scope, browser, 'Browser', { version: browser.version(), name: browser.options.name }, true);
-    this._selectors = selectors;
-  }
-
-  async newContext(params: channels.BrowserNewContextParams, metadata: CallMetadata): Promise<channels.BrowserNewContextResult> {
-    if (params.recordVideo)
-      params.recordVideo.dir = this._object.options.artifactsDir;
-    const context = await this._object.newContext(params);
-    this._contexts.add(context);
-    context._setSelectors(this._selectors);
-    context.on(BrowserContext.Events.Close, () => this._contexts.delete(context));
-    if (params.storageState)
-      await context.setStorageState(metadata, params.storageState);
-    return { context: new BrowserContextDispatcher(this._scope, context) };
-  }
-
-  async close(): Promise<void> {
-    // Client should not send us Browser.close.
-  }
-
-  async killForTests(): Promise<void> {
-    // Client should not send us Browser.killForTests.
-  }
-
-  async newBrowserCDPSession(): Promise<channels.BrowserNewBrowserCDPSessionResult> {
-    if (!this._object.options.isChromium)
-      throw new Error(`CDP session is only available in Chromium`);
-    const crBrowser = this._object as CRBrowser;
-    return { session: new CDPSessionDispatcher(this._scope, await crBrowser.newBrowserCDPSession()) };
-  }
-
-  async startTracing(params: channels.BrowserStartTracingParams): Promise<void> {
-    if (!this._object.options.isChromium)
-      throw new Error(`Tracing is only available in Chromium`);
-    const crBrowser = this._object as CRBrowser;
-    await crBrowser.startTracing(params.page ? (params.page as PageDispatcher)._object : undefined, params);
-  }
-
-  async stopTracing(): Promise<channels.BrowserStopTracingResult> {
-    if (!this._object.options.isChromium)
-      throw new Error(`Tracing is only available in Chromium`);
-    const crBrowser = this._object as CRBrowser;
-    const buffer = await crBrowser.stopTracing();
-    return { binary: buffer.toString('base64') };
-  }
-
-  async cleanupContexts() {
-    await Promise.all(Array.from(this._contexts).map(context => context.close(internalCallMetadata())));
   }
 }
 
@@ -162,4 +106,13 @@ function toProtocolLogger(logger: Logger | undefined): ProtocolLogger | undefine
     if (logger.isEnabled('protocol', 'verbose'))
       logger.log('protocol', 'verbose', (direction === 'send' ? 'SEND ► ' : '◀ RECV ') + JSON.stringify(message), [], {});
   } : undefined;
+}
+
+function envObjectToArray(env: NodeJS.ProcessEnv): { name: string, value: string }[] {
+  const result: { name: string, value: string }[] = [];
+  for (const name in env) {
+    if (!Object.is(env[name], undefined))
+      result.push({ name, value: String(env[name]) });
+  }
+  return result;
 }

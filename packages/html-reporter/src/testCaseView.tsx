@@ -14,41 +14,96 @@
   limitations under the License.
 */
 
-import type { TestCase } from '@playwright/test/src/reporters/html';
+import type { TestAnnotation } from '@playwright/test';
+import type { TestCase, TestCaseSummary } from './types';
 import * as React from 'react';
 import { TabbedPane } from './tabbedPane';
 import { AutoChip } from './chip';
 import './common.css';
-import { ProjectLink } from './links';
+import { Link, testResultHref, TraceLink, useSearchParams } from './links';
 import { statusIcon } from './statusIcon';
 import './testCaseView.css';
 import { TestResultView } from './testResultView';
+import { linkifyText } from '@web/renderUtils';
+import { msToString } from '@isomorphic/formatUtils';
+import { clsx } from '@web/uiUtils';
+import { CopyToClipboardContainer } from './copyToClipboard';
+import { HeaderView } from './headerView';
+import { ProjectAndTagLabelsView } from './labels';
+import type { LoadedReport } from './loadedReport';
 
 export const TestCaseView: React.FC<{
-  projectNames: string[],
-  test: TestCase | undefined,
-}> = ({ projectNames, test }) => {
-  const [selectedResultIndex, setSelectedResultIndex] = React.useState(0);
+  report: LoadedReport,
+  test: TestCase,
+  next: TestCaseSummary | undefined,
+  prev: TestCaseSummary | undefined,
+  run: number,
+}> = ({ report, test, run, next, prev }) => {
+  const [selectedResultIndex, setSelectedResultIndex] = React.useState(run);
+  const searchParams = useSearchParams();
 
-  return <div className='test-case-column vbox'>
-    {test && <div className='test-case-path'>{test.path.join(' › ')}</div>}
-    {test && <div className='test-case-title'>{test?.title}</div>}
-    {test && <div className='test-case-location'>{test.location.file}:{test.location.line}</div>}
-    {test && !!test.projectName && <ProjectLink projectNames={projectNames} projectName={test.projectName}></ProjectLink>}
-    {test && !!test.annotations.length && <AutoChip header='Annotations'>
-      {test.annotations.map(a => <div className='test-case-annotation'>
-        <span style={{ fontWeight: 'bold' }}>{a.type}</span>
-        {a.description && <span>: {a.description}</span>}
-      </div>)}
+  const visibleTestAnnotations = test.annotations.filter(a => !a.type.startsWith('_')) ?? [];
+  appendRepeatEachIndexAnnotation(visibleTestAnnotations, test.repeatEachIndex);
+
+  return <>
+    <HeaderView
+      title={test.title}
+      leftSuperHeader={<div className='test-case-path'>{test.path.join(' › ')}</div>}
+      rightSuperHeader={<>
+        <div className={clsx(!prev && 'hidden')}><Link href={testResultHref({ test: prev }, searchParams)}>« previous</Link></div>
+        <div style={{ width: 10 }}></div>
+        <div className={clsx(!next && 'hidden')}><Link href={testResultHref({ test: next }, searchParams)}>next »</Link></div>
+      </>}
+    />
+    <div className='hbox' style={{ lineHeight: '24px' }}>
+      <div className='test-case-location'>
+        <CopyToClipboardContainer value={`${test.location.file}:${test.location.line}`}>
+          {test.location.file}:{test.location.line}
+        </CopyToClipboardContainer>
+      </div>
+      <div style={{ flex: 'auto' }}></div>
+      <TraceLink test={test} run={selectedResultIndex} trailingSeparator={true} />
+      <div className='test-case-duration'>{msToString(test.duration)}</div>
+    </div>
+    <ProjectAndTagLabelsView style={{ marginLeft: '6px' }} projectNames={report.json().projectNames} activeProjectName={test.projectName} otherLabels={test.tags} />
+    {/* If there are no results, display test annotations. Otherwise test annotations will be displayed alongside runtime annotations in individual result pane */}
+    {test.results.length === 0 && visibleTestAnnotations.length !== 0 && <AutoChip header='Annotations' dataTestId='test-case-annotations'>
+      {visibleTestAnnotations.map((annotation, index) => <TestCaseAnnotationView key={index} annotation={annotation} />)}
     </AutoChip>}
-    {test && <TabbedPane tabs={
+    <TabbedPane tabs={
       test.results.map((result, index) => ({
         id: String(index),
-        title: <div style={{ display: 'flex', alignItems: 'center' }}>{statusIcon(result.status)} {retryLabel(index)}</div>,
-        render: () => <TestResultView test={test!} result={result}></TestResultView>
-      })) || []} selectedTab={String(selectedResultIndex)} setSelectedTab={id => setSelectedResultIndex(+id)} />}
-  </div>;
+        title: <div style={{ display: 'flex', alignItems: 'center' }}>
+          {statusIcon(result.status)} {retryLabel(index)}
+          {(test.results.length > 1) && <span className='test-case-run-duration'>{msToString(result.duration)}</span>}
+        </div>,
+        render: () => {
+          const visibleAnnotations = result.annotations.filter(annotation => !annotation.type.startsWith('_'));
+          appendRepeatEachIndexAnnotation(visibleAnnotations, test.repeatEachIndex);
+          return <>
+            {!!visibleAnnotations.length && <AutoChip header='Annotations' dataTestId='test-case-annotations'>
+              {visibleAnnotations.map((annotation, index) => <TestCaseAnnotationView key={index} annotation={annotation} />)}
+            </AutoChip>}
+            <TestResultView test={test!} result={result} report={report} />
+          </>;
+        },
+      })) || []} selectedTab={String(selectedResultIndex)} setSelectedTab={id => setSelectedResultIndex(+id)} />
+  </>;
 };
+
+function TestCaseAnnotationView({ annotation: { type, description } }: { annotation: TestAnnotation }) {
+  return (
+    <div className='test-case-annotation'>
+      <span style={{ fontWeight: 'bold' }}>{type}</span>
+      {description && <CopyToClipboardContainer value={description}>: {linkifyText(description)}</CopyToClipboardContainer>}
+    </div>
+  );
+}
+
+function appendRepeatEachIndexAnnotation(annotations: TestAnnotation[], repeatEachIndex: number | undefined) {
+  if (repeatEachIndex)
+    annotations.push({ type: 'repeatEachIndex', description: String(repeatEachIndex) });
+}
 
 function retryLabel(index: number) {
   if (!index)

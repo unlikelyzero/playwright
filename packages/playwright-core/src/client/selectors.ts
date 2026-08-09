@@ -15,38 +15,40 @@
  */
 
 import { evaluationScript } from './clientHelper';
-import * as channels from '../protocol/channels';
-import { ChannelOwner } from './channelOwner';
-import { SelectorEngine } from './types';
-import * as api from '../../types/types';
+import { setTestIdAttribute } from './locator';
+import { kNoTimeout } from './timeoutSettings';
+
+import type { SelectorEngine } from './types';
+import type * as api from '../../types/types';
+import type * as channels from './channels';
+import type { BrowserContext } from './browserContext';
 
 export class Selectors implements api.Selectors {
-  private _channels = new Set<SelectorsOwner>();
-  private _registrations: channels.SelectorsRegisterParams[] = [];
+  private _selectorEngines: channels.SelectorEngine[] = [];
+  private _testIdAttributeName: string | undefined;
+  readonly _contextsForSelectors = new Set<BrowserContext>();
 
   async register(name: string, script: string | (() => SelectorEngine) | { path?: string, content?: string }, options: { contentScript?: boolean } = {}): Promise<void> {
+    if (this._selectorEngines.some(engine => engine.name === name))
+      throw new Error(`selectors.register: "${name}" selector engine has been already registered`);
+
     const source = await evaluationScript(script, undefined, false);
-    const params = { ...options, name, source };
-    for (const channel of this._channels)
-      await channel._channel.register(params);
-    this._registrations.push(params);
+    const selectorEngine: channels.SelectorEngine = { ...options, name, source };
+    for (const context of this._contextsForSelectors)
+      await context._channel.registerSelectorEngine({ selectorEngine }, kNoTimeout);
+    this._selectorEngines.push(selectorEngine);
   }
 
-  _addChannel(channel: SelectorsOwner) {
-    this._channels.add(channel);
-    for (const params of this._registrations) {
-      // This should not fail except for connection closure, but just in case we catch.
-      channel._channel.register(params).catch(e => {});
+  setTestIdAttribute(attributeName: string) {
+    this._testIdAttributeName = attributeName;
+    setTestIdAttribute(attributeName);
+    for (const context of this._contextsForSelectors) {
+      context._options.testIdAttributeName = attributeName;
+      context._channel.setTestIdAttributeName({ testIdAttributeName: attributeName }, kNoTimeout).catch(() => {});
     }
   }
 
-  _removeChannel(channel: SelectorsOwner) {
-    this._channels.delete(channel);
-  }
-}
-
-export class SelectorsOwner extends ChannelOwner<channels.SelectorsChannel> {
-  static from(browser: channels.SelectorsChannel): SelectorsOwner {
-    return (browser as any)._object;
+  _withSelectorOptions<T>(options: T) {
+    return { ...options, selectorEngines: this._selectorEngines, testIdAttributeName: this._testIdAttributeName };
   }
 }

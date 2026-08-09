@@ -19,39 +19,64 @@ import './chip.css';
 import './colors.css';
 import './common.css';
 import * as icons from './icons';
+import { clsx } from '@web/uiUtils';
+import { type AnchorID, useAnchor } from './links';
 
-export const Chip: React.FunctionComponent<{
-  header: JSX.Element | string,
+export const Chip: React.FC<{
+  header: React.JSX.Element | string,
+  footer?: React.JSX.Element | string,
   expanded?: boolean,
   noInsets?: boolean,
   setExpanded?: (expanded: boolean) => void,
-  children?: any,
-}> = ({ header, expanded, setExpanded, children, noInsets }) => {
-  return <div className='chip'>
-    <div
-      className={'chip-header' + (setExpanded ? ' expanded-' + expanded : '')}
-      onClick={() => setExpanded?.(!expanded)}
-      title={typeof header === 'string' ? header : undefined}>
-      {setExpanded && !!expanded && icons.downArrow()}
-      {setExpanded && !expanded && icons.rightArrow()}
-      {header}
-    </div>
-    {(!setExpanded || expanded) && <div className={'chip-body' + (noInsets ? ' chip-body-no-insets' : '')}>{children}</div>}
+  children?: React.ReactNode,
+  body?: () => React.ReactNode | undefined,
+  dataTestId?: string,
+}> = ({ header, footer, expanded, setExpanded, children, noInsets, body, dataTestId }) => {
+  const id = React.useId();
+  const title = typeof header === 'string' ? header : undefined;
+  const headerContent = <>
+    {setExpanded ? (expanded ? <icons.downArrow /> : <icons.rightArrow />) : <icons.spacer />}
+    {header}
+  </>;
+  return <div className='chip' data-testid={dataTestId}>
+    {setExpanded ? <button
+      type='button'
+      aria-expanded={!!expanded}
+      aria-controls={id}
+      className={clsx('chip-header', 'expanded-' + expanded)}
+      onClick={() => setExpanded(!expanded)}
+      title={title}>
+      {headerContent}
+    </button> : <h2 className='chip-header' title={title}>
+      {headerContent}
+    </h2>}
+    {(!setExpanded || expanded) && <div id={id} role='region' className={clsx('chip-body', noInsets && 'chip-body-no-insets')}>
+      {children}
+      {body && body()}
+      {footer && <div className='chip-footer'>{footer}</div>}
+    </div>}
   </div>;
 };
 
 export const AutoChip: React.FC<{
-  header: JSX.Element | string,
+  header: React.JSX.Element | string,
   initialExpanded?: boolean,
   noInsets?: boolean,
-  children?: any,
-}> = ({ header, initialExpanded, noInsets, children }) => {
-  const [expanded, setExpanded] = React.useState(initialExpanded || initialExpanded === undefined);
+  children?: React.ReactNode,
+  body?: () => React.ReactNode | undefined,
+  dataTestId?: string,
+  revealOnAnchorId?: AnchorID,
+}> = ({ header, initialExpanded, noInsets, children, body, dataTestId, revealOnAnchorId }) => {
+  const [expanded, setExpanded] = React.useState(initialExpanded ?? true);
+  const onReveal = React.useCallback(() => setExpanded(true), []);
+  useAnchor(revealOnAnchorId, onReveal);
   return <Chip
     header={header}
     expanded={expanded}
     setExpanded={setExpanded}
     noInsets={noInsets}
+    body={body}
+    dataTestId={dataTestId}
   >
     {children}
   </Chip>;

@@ -1,9 +1,12 @@
 {
   "compilerOptions": {
     "strict": true,
-    "target": "ES2019",
+    "target": "ESNext",
     "noEmit": true,
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "allowSyntheticDefaultImports": true,
+    "types": ["node"],
+    "ignoreDeprecations": "6.0"
   },
   "include": [
     "test.ts"

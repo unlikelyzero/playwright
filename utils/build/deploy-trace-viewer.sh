@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
@@ -27,15 +27,15 @@ npm ci
 npm run build
 
 # 2. Configure Git and clone the Trace Viewer repository
-git config --global user.name github-actions
-git config --global user.email 41898282+github-actions[bot]@users.noreply.github.com
-git clone "https://${GH_SERVICE_ACCOUNT_TOKEN}@github.com/microsoft/trace.playwright.dev.git" trace.playwright.dev
+git config --global user.name microsoft-playwright-automation[bot]
+git config --global user.email 203992400+microsoft-playwright-automation[bot]@users.noreply.github.com
+git clone "https://x-access-token:${GH_SERVICE_ACCOUNT_TOKEN}@github.com/microsoft/trace.playwright.dev.git" trace.playwright.dev
 
 # 3. Copy the built Trace Viewer to the repository
 if [[ "${RELEASE_CHANNEL}" == "--stable" ]]; then
   rm -rf trace.playwright.dev/docs/
   mkdir trace.playwright.dev/docs/
-  cp -r packages/playwright-core/lib/webpack/traceViewer/* trace.playwright.dev/docs/
+  cp -r packages/playwright-core/lib/vite/traceViewer/* trace.playwright.dev/docs/
 
   # Restore CNAME, beta/ & next/ branches.
   cd trace.playwright.dev/
@@ -47,11 +47,11 @@ if [[ "${RELEASE_CHANNEL}" == "--stable" ]]; then
   echo "Updated stable version"
 elif [[ "${RELEASE_CHANNEL}" == "--canary" ]]; then
   rm -rf trace.playwright.dev/docs/next/
-  cp -r packages/playwright-core/lib/webpack/traceViewer/ trace.playwright.dev/docs/next/
+  cp -r packages/playwright-core/lib/vite/traceViewer/ trace.playwright.dev/docs/next/
   echo "Updated canary version"
 elif [[ "${RELEASE_CHANNEL}" == "--beta" ]]; then
   rm -rf trace.playwright.dev/docs/beta/
-  cp -r packages/playwright-core/lib/webpack/traceViewer/ trace.playwright.dev/docs/beta/
+  cp -r packages/playwright-core/lib/vite/traceViewer/ trace.playwright.dev/docs/beta/
   echo "Updated beta version"
 else
   echo "ERROR: unknown environment - ${RELEASE_CHANNEL}"

@@ -24,10 +24,10 @@ it('should have a nice preview', async ({ page, server }) => {
   const check = page.locator('#check');
   const text = await inner.evaluateHandle(e => e.firstChild);
   await page.evaluate(() => 1);  // Give them a chance to calculate the preview.
-  expect(String(outer)).toBe('Locator@#outer');
-  expect(String(inner)).toBe('Locator@#outer >> #inner');
-  expect(String(text)).toBe('JSHandle@#text=Text,↵more text');
-  expect(String(check)).toBe('Locator@#check');
+  expect.soft(String(outer)).toBe(`locator('#outer')`);
+  expect.soft(String(inner)).toBe(`locator('#outer').locator('#inner')`);
+  expect.soft(String(text)).toBe(`JSHandle@#text=Text,↵more text`);
+  expect.soft(String(check)).toBe(`locator('#check')`);
 });
 
 it('getAttribute should work', async ({ page, server }) => {
@@ -58,12 +58,6 @@ it('inputValue should work', async ({ page, server }) => {
   expect(await locator2.inputValue().catch(e => e.message)).toContain('Node is not an <input>, <textarea> or <select> element');
 });
 
-it('inputValue should work on label', async ({ page, server }) => {
-  await page.setContent(`<label><input type=text></input></label>`);
-  await page.fill('input', 'foo');
-  expect(await page.locator('label').inputValue()).toBe('foo');
-});
-
 it('innerHTML should work', async ({ page, server }) => {
   await page.goto(`${server.PREFIX}/dom.html`);
   const locator = page.locator('#outer');
@@ -91,7 +85,7 @@ it('innerText should produce log', async ({ page, server }) => {
   await page.setContent(`<div>Hello</div>`);
   const locator = page.locator('span');
   const error = await locator.innerText({ timeout: 1000 }).catch(e => e);
-  expect(error.message).toContain('waiting for selector "span"');
+  expect(error.message).toContain('waiting for locator(\'span\')');
 });
 
 it('textContent should work', async ({ page, server }) => {
@@ -99,25 +93,6 @@ it('textContent should work', async ({ page, server }) => {
   const locator = page.locator('#inner');
   expect(await locator.textContent()).toBe('Text,\nmore text');
   expect(await page.textContent('#inner')).toBe('Text,\nmore text');
-});
-
-it('isVisible and isHidden should work', async ({ page }) => {
-  await page.setContent(`<div>Hi</div><span></span>`);
-
-  const div = page.locator('div');
-  expect(await div.isVisible()).toBe(true);
-  expect(await div.isHidden()).toBe(false);
-  expect(await page.isVisible('div')).toBe(true);
-  expect(await page.isHidden('div')).toBe(false);
-
-  const span = page.locator('span');
-  expect(await span.isVisible()).toBe(false);
-  expect(await span.isHidden()).toBe(true);
-  expect(await page.isVisible('span')).toBe(false);
-  expect(await page.isHidden('span')).toBe(true);
-
-  expect(await page.isVisible('no-such-element')).toBe(false);
-  expect(await page.isHidden('no-such-element')).toBe(true);
 });
 
 it('isEnabled and isDisabled should work', async ({ page }) => {
@@ -144,7 +119,15 @@ it('isEnabled and isDisabled should work', async ({ page }) => {
 });
 
 it('isEditable should work', async ({ page }) => {
-  await page.setContent(`<input id=input1 disabled><textarea></textarea><input id=input2>`);
+  await page.setContent(`
+    <input id=input1 disabled>
+    <textarea></textarea>
+    <input id=input2>
+    <div contenteditable="true"></div>
+    <span id=span1 role=textbox aria-readonly=true></span>
+    <span id=span2 role=textbox></span>
+    <button>button</button>
+  `);
   await page.$eval('textarea', t => t.readOnly = true);
   const input1 = page.locator('#input1');
   expect(await input1.isEditable()).toBe(false);
@@ -155,6 +138,11 @@ it('isEditable should work', async ({ page }) => {
   const textarea = page.locator('textarea');
   expect(await textarea.isEditable()).toBe(false);
   expect(await page.isEditable('textarea')).toBe(false);
+  expect(await page.locator('div').isEditable()).toBe(true);
+  expect(await page.locator('#span1').isEditable()).toBe(false);
+  expect(await page.locator('#span2').isEditable()).toBe(true);
+  const error = await page.locator('button').isEditable().catch(e => e);
+  expect(error.message).toContain('Element is not an <input>, <textarea>, <select> or [contenteditable] and does not have a role allowing [aria-readonly]');
 });
 
 it('isChecked should work', async ({ page }) => {
@@ -169,6 +157,21 @@ it('isChecked should work', async ({ page }) => {
   expect(error.message).toContain('Not a checkbox or radio button');
 });
 
+it('isChecked should work for indeterminate input', async ({ page }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/20190' });
+
+  await page.setContent(`<input type="checkbox" checked>`);
+  await page.locator('input').evaluate((e: HTMLInputElement) => e.indeterminate = true);
+
+  expect(await page.locator('input').isChecked()).toBe(true);
+  await expect(page.locator('input')).toBeChecked();
+
+  await page.locator('input').uncheck();
+
+  expect(await page.locator('input').isChecked()).toBe(false);
+  await expect(page.locator('input')).not.toBeChecked();
+});
+
 it('allTextContents should work', async ({ page }) => {
   await page.setContent(`<div>A</div><div>B</div><div>C</div>`);
   expect(await page.locator('div').allTextContents()).toEqual(['A', 'B', 'C']);
@@ -179,15 +182,55 @@ it('allInnerTexts should work', async ({ page }) => {
   expect(await page.locator('div').allInnerTexts()).toEqual(['A', 'B', 'C']);
 });
 
-it('isVisible and isHidden should work with details', async ({ page }) => {
-  await page.setContent(`<details>
-    <summary>click to open</summary>
-      <ul>
-        <li>hidden item 1</li>
-        <li>hidden item 2</li>
-        <li>hidden item 3</li>
-      </ul
-  </details>`);
+it('should return page', async ({ page, server }) => {
+  await page.goto(server.PREFIX + '/frames/two-frames.html');
+  const outer = page.locator('#outer');
+  expect(outer.page()).toBe(page);
 
-  await expect(page.locator('ul')).toBeHidden();
+  const inner = outer.locator('#inner');
+  expect(inner.page()).toBe(page);
+
+  const inFrame = page.frames()[1].locator('div');
+  expect(inFrame.page()).toBe(page);
+});
+
+it('description should return null for locator without description', async ({ page }) => {
+  const locator = page.locator('button');
+  expect(locator.description()).toBe(null);
+});
+
+it('description should return description for locator with simple description', async ({ page }) => {
+  const locator = page.locator('button').describe('Submit button');
+  expect(locator.description()).toBe('Submit button');
+});
+
+it('description should return description with special characters', async ({ page }) => {
+  const locator = page.locator('div').describe('Button with "quotes" and \'apostrophes\'');
+  expect(locator.description()).toBe('Button with "quotes" and \'apostrophes\'');
+});
+
+it('description should return description for chained locators', async ({ page }) => {
+  const locator = page.locator('form').locator('input').describe('Form input field');
+  expect(locator.description()).toBe('Form input field');
+});
+
+it('description should return description for locator with multiple describe calls', async ({ page }) => {
+  const locator1 = page.locator('foo').describe('First description');
+  expect(locator1.description()).toBe('First description');
+  const locator2 = locator1.locator('button').describe('Second description');
+  expect(locator2.description()).toBe('Second description');
+  const locator3 = locator2.locator('button');
+  expect(locator3.description()).toBe(null);
+});
+
+it('toString() returns formatted locator', async ({ page }) => {
+  const locator = page.getByRole('button', { name: 'Submit' });
+  expect(locator.toString()).toBe(`getByRole('button', { name: 'Submit' })`);
+  expect(locator.description()).toBe(null);
+});
+
+it('toString() prefers description', async ({ page }) => {
+  const locator = page.getByRole('button', { name: 'Submit' }).describe('Submit button');
+  expect(locator.toString()).toBe(`Submit button`);
+  expect(locator.toString()).toBe(locator.description());
 });

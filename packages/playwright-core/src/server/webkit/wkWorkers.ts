@@ -14,12 +14,15 @@
  * limitations under the License.
  */
 
-import { eventsHelper, RegisteredListener } from '../../utils/eventsHelper';
-import { Page, Worker } from '../page';
-import { Protocol } from './protocol';
+import { eventsHelper } from '@utils/eventsHelper';
+import { Worker } from '../page';
 import { WKSession } from './wkConnection';
-import { WKExecutionContext } from './wkExecutionContext';
-import * as types from '../types';
+import { createHandle, WKExecutionContext } from './wkExecutionContext';
+
+import type { Protocol } from './protocol';
+import type { RegisteredListener } from '@utils/eventsHelper';
+import type { Page } from '../page';
+import type * as types from '../types';
 
 export class WKWorkers {
   private _sessionListeners: RegisteredListener[] = [];
@@ -36,7 +39,7 @@ export class WKWorkers {
     this._sessionListeners = [
       eventsHelper.addEventListener(session, 'Worker.workerCreated', (event: Protocol.Worker.workerCreatedPayload) => {
         const worker = new Worker(this._page, event.url);
-        const workerSession = new WKSession(session.connection, event.workerId, 'Most likely the worker has been closed.', (message: any) => {
+        const workerSession = new WKSession(session.connection, event.workerId, (message: any) => {
           session.send('Worker.sendMessageToWorker', {
             workerId: event.workerId,
             message: JSON.stringify(message)
@@ -45,8 +48,9 @@ export class WKWorkers {
           });
         });
         this._workerSessions.set(event.workerId, workerSession);
-        worker._createExecutionContext(new WKExecutionContext(workerSession, undefined));
-        this._page._addWorker(event.workerId, worker);
+        worker.createExecutionContext(new WKExecutionContext(workerSession, undefined));
+        worker.workerScriptLoaded();
+        this._page.addWorker(event.workerId, worker);
         workerSession.on('Console.messageAdded', event => this._onConsoleMessage(worker, event));
         Promise.all([
           workerSession.send('Runtime.enable'),
@@ -54,7 +58,7 @@ export class WKWorkers {
           session.send('Worker.initialized', { workerId: event.workerId })
         ]).catch(e => {
           // Worker can go as we are initializing it.
-          this._page._removeWorker(event.workerId);
+          this._page.removeWorker(event.workerId);
         });
       }),
       eventsHelper.addEventListener(session, 'Worker.dispatchMessageFromWorker', (event: Protocol.Worker.dispatchMessageFromWorkerPayload) => {
@@ -67,15 +71,15 @@ export class WKWorkers {
         const workerSession = this._workerSessions.get(event.workerId)!;
         if (!workerSession)
           return;
-        workerSession.dispose(false);
+        workerSession.dispose();
         this._workerSessions.delete(event.workerId);
-        this._page._removeWorker(event.workerId);
+        this._page.removeWorker(event.workerId);
       })
     ];
   }
 
   clear() {
-    this._page._clearWorkers();
+    this._page.clearWorkers();
     this._workerSessions.clear();
   }
 
@@ -92,13 +96,14 @@ export class WKWorkers {
       derivedType = 'timeEnd';
 
     const handles = (parameters || []).map(p => {
-      return worker._existingExecutionContext!.createHandle(p);
+      return createHandle(worker.existingExecutionContext!, p);
     });
     const location: types.ConsoleMessageLocation = {
       url: url || '',
       lineNumber: (lineNumber || 1) - 1,
       columnNumber: (columnNumber || 1) - 1
     };
-    this._page._addConsoleMessage(derivedType, handles, location, handles.length ? undefined : text);
+    const timestamp = event.message.timestamp ? event.message.timestamp * 1000 : Date.now();
+    this._page.addConsoleMessage(worker, derivedType, handles, location, handles.length ? undefined : text, timestamp);
   }
 }

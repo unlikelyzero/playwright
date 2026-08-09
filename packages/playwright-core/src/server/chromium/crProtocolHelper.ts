@@ -15,12 +15,15 @@
  * limitations under the License.
  */
 
-import { CRSession } from './crConnection';
-import { Protocol } from './protocol';
 import fs from 'fs';
-import * as types from '../types';
-import { mkdirIfNeeded } from '../../utils/utils';
-import { splitErrorMessage } from '../../utils/stackTrace';
+
+import { splitErrorMessage } from '@utils/stackTrace';
+import { mkdirIfNeeded } from '@utils/fileUtils';
+
+import type { CRSession } from './crConnection';
+import type { Protocol } from './protocol';
+import type * as types from '../types';
+
 
 export function getExceptionMessage(exceptionDetails: Protocol.Runtime.ExceptionDetails): string {
   if (exceptionDetails.exception)
@@ -37,32 +40,40 @@ export function getExceptionMessage(exceptionDetails: Protocol.Runtime.Exception
 }
 
 export async function releaseObject(client: CRSession, objectId: string) {
-  await client.send('Runtime.releaseObject', { objectId }).catch(error => {});
+  await client.send('Runtime.releaseObject', { objectId }).catch(error => { });
 }
 
-export async function readProtocolStream(client: CRSession, handle: string, path: string | null): Promise<Buffer> {
+export async function saveProtocolStream(client: CRSession, handle: string, path: string) {
   let eof = false;
-  let fd: fs.promises.FileHandle | undefined;
-  if (path) {
-    await mkdirIfNeeded(path);
-    fd = await fs.promises.open(path, 'w');
+  await mkdirIfNeeded(path);
+  const fd = await fs.promises.open(path, 'w');
+  try {
+    while (!eof) {
+      const response = await client.send('IO.read', { handle });
+      eof = response.eof;
+      const buf = Buffer.from(response.data, response.base64Encoded ? 'base64' : undefined);
+      await fd.write(buf);
+    }
+  } finally {
+    await fd.close().catch(() => {});
   }
-  const bufs = [];
+  await client.send('IO.close', { handle });
+}
+
+export async function readProtocolStream(client: CRSession, handle: string): Promise<Buffer> {
+  let eof = false;
+  const chunks = [];
   while (!eof) {
     const response = await client.send('IO.read', { handle });
     eof = response.eof;
     const buf = Buffer.from(response.data, response.base64Encoded ? 'base64' : undefined);
-    bufs.push(buf);
-    if (fd)
-      await fd.write(buf);
+    chunks.push(buf);
   }
-  if (fd)
-    await fd.close();
   await client.send('IO.close', { handle });
-  return Buffer.concat(bufs);
+  return Buffer.concat(chunks);
 }
 
-export function toConsoleMessageLocation(stackTrace: Protocol.Runtime.StackTrace | undefined): types.ConsoleMessageLocation {
+export function stackTraceToLocation(stackTrace: Protocol.Runtime.StackTrace | undefined): types.ConsoleMessageLocation {
   return stackTrace && stackTrace.callFrames.length ? {
     url: stackTrace.callFrames[0].url,
     lineNumber: stackTrace.callFrames[0].lineNumber,
@@ -86,7 +97,8 @@ export function exceptionToError(exceptionDetails: Protocol.Runtime.ExceptionDet
 
   const err = new Error(message);
   err.stack = stack;
-  err.name = name;
+  const nameOverride = exceptionDetails.exception?.preview?.properties.find(o => o.name === 'name');
+  err.name = nameOverride ? nameOverride.value ?? 'Error' : name;
   return err;
 }
 
@@ -100,5 +112,16 @@ export function toModifiersMask(modifiers: Set<types.KeyboardModifier>): number 
     mask |= 4;
   if (modifiers.has('Shift'))
     mask |= 8;
+  return mask;
+}
+
+export function toButtonsMask(buttons: Set<types.MouseButton>): number {
+  let mask = 0;
+  if (buttons.has('left'))
+    mask |= 1;
+  if (buttons.has('right'))
+    mask |= 2;
+  if (buttons.has('middle'))
+    mask |= 4;
   return mask;
 }

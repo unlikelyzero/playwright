@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-import { test as it } from './pageTest';
+import { test as it, expect } from './pageTest';
 
 it('clicking on links which do not commit navigation', async ({ page, server, httpsServer }) => {
   await page.goto(server.EMPTY_PAGE);
@@ -23,8 +23,7 @@ it('clicking on links which do not commit navigation', async ({ page, server, ht
   await page.click('a');
 });
 
-it('calling window.stop async', async ({ page, server, isElectron }) => {
-  it.fixme(isElectron);
+it('calling window.stop async', async ({ page, server }) => {
   server.setRoute('/empty.html', async (req, res) => {});
   await page.evaluate(url => {
     window.location.href = url;
@@ -32,7 +31,7 @@ it('calling window.stop async', async ({ page, server, isElectron }) => {
   }, server.EMPTY_PAGE);
 });
 
-it('calling window.stop sync', async ({ page, server }) => {
+it('calling window.stop sync', async ({ page, server, browserName }) => {
   await page.evaluate(url => {
     window.location.href = url;
     window.stop();
@@ -65,4 +64,112 @@ it('opening a popup', async function({ page, server }) {
     page.waitForEvent('popup'),
     page.evaluate(() => window.open(window.location.href) && 1),
   ]);
+});
+
+it('clicking in the middle of navigation that aborts', async ({ page, server }) => {
+  let abortCallback;
+  const abortPromise = new Promise(f => abortCallback = f);
+
+  let stallCallback;
+  const stallPromise = new Promise(f => stallCallback = f);
+
+  server.setRoute('/stall.html', async (req, res) => {
+    stallCallback();
+    await abortPromise;
+    req.socket.destroy();
+  });
+
+  await page.goto(server.PREFIX + '/one-style.html');
+  page.goto(server.PREFIX + '/stall.html').catch(() => {});
+  await stallPromise;
+
+  const clickPromise = page.click('body');
+  await page.waitForTimeout(1000);
+  abortCallback();
+
+  await clickPromise;
+});
+
+it('clicking in the middle of navigation that commits', async ({ page, server }) => {
+  let commitCallback;
+  const abortPromise = new Promise(f => commitCallback = f);
+
+  let stallCallback;
+  const stallPromise = new Promise(f => stallCallback = f);
+
+  server.setRoute('/stall.html', async (req, res) => {
+    stallCallback();
+    await abortPromise;
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('hello world');
+  });
+
+  await page.goto(server.PREFIX + '/one-style.html');
+  page.goto(server.PREFIX + '/stall.html').catch(() => {});
+  await stallPromise;
+
+  const clickPromise = page.click('body');
+  await page.waitForTimeout(1000);
+  commitCallback();
+
+  await clickPromise;
+  await expect(page.locator('body')).toContainText('hello world');
+});
+
+it('clicking a link intercepted by the Navigation API same-document', {
+  annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/41125' },
+}, async ({ page, server }) => {
+  server.setRoute('/intercept.html', (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`
+      <a id="go" href="/other">go</a>
+      <p id="status">initial</p>
+      <script>
+        navigation.addEventListener('navigate', event => {
+          if (!event.canIntercept)
+            return;
+          event.intercept({
+            handler: async () => {
+              const dest = new URL(event.destination.url).pathname;
+              document.getElementById('status').textContent = 'intercepted:' + dest;
+            },
+          });
+        });
+      </script>
+    `);
+  });
+
+  await page.goto(server.PREFIX + '/intercept.html');
+  await expect(page.locator('#status')).toHaveText('initial');
+
+  // Should not hang waiting for the same-document navigation to commit.
+  await page.locator('#go').click();
+
+  await expect(page.locator('#status')).toHaveText('intercepted:/other');
+  expect(new URL(page.url()).pathname).toBe('/other');
+});
+
+it('goBack in the middle of navigation that commits', async ({ page, server }) => {
+  let commitCallback;
+  const abortPromise = new Promise(f => commitCallback = f);
+
+  let stallCallback;
+  const stallPromise = new Promise(f => stallCallback = f);
+
+  server.setRoute('/stall.html', async (req, res) => {
+    stallCallback();
+    await abortPromise;
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('hello world');
+  });
+
+  await page.goto(server.PREFIX + '/one-style.html');
+  page.goto(server.PREFIX + '/stall.html').catch(() => {});
+  await stallPromise;
+
+  const goBackPromise = page.goBack().catch(() => {});
+  await page.waitForTimeout(1000);
+  commitCallback();
+
+  await goBackPromise;
 });

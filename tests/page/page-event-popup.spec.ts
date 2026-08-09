@@ -16,7 +16,7 @@
 
 import { test as it, expect } from './pageTest';
 
-it('should work #smoke', async ({ page }) => {
+it('should work @smoke', async ({ page }) => {
   const [popup] = await Promise.all([
     page.waitForEvent('popup'),
     page.evaluate(() => window['__popup'] = window.open('about:blank')),
@@ -47,8 +47,6 @@ it('should emit for immediately closed popups', async ({ page }) => {
 });
 
 it('should emit for immediately closed popups 2', async ({ page, server, browserName, video }) => {
-  it.fixme(browserName === 'firefox' && video === 'on');
-
   await page.goto(server.EMPTY_PAGE);
   const [popup] = await Promise.all([
     page.waitForEvent('popup'),
@@ -65,9 +63,12 @@ it('should be able to capture alert', async ({ page }) => {
     const win = window.open('');
     win.alert('hello');
   });
-  const popup = await page.waitForEvent('popup');
-  const dialog = await popup.waitForEvent('dialog');
+  const [popup, dialog] = await Promise.all([
+    page.waitForEvent('popup'),
+    page.context().waitForEvent('dialog'),
+  ]);
   expect(dialog.message()).toBe('hello');
+  expect(dialog.page()).toBe(popup);
   await dialog.dismiss();
   await evaluatePromise;
 });
@@ -120,6 +121,7 @@ it('should work with clicking target=_blank', async ({ page, server }) => {
   ]);
   expect(await page.evaluate(() => !!window.opener)).toBe(false);
   expect(await popup.evaluate(() => !!window.opener)).toBe(true);
+  expect(popup.mainFrame().page()).toBe(popup);
 });
 
 it('should work with fake-clicking target=_blank and rel=noopener', async ({ page, server }) => {
@@ -144,23 +146,9 @@ it('should work with clicking target=_blank and rel=noopener', async ({ page, se
   expect(await popup.evaluate(() => !!window.opener)).toBe(false);
 });
 
-it('should not treat navigations as new popups', async ({ page, server }) => {
-  await page.goto(server.EMPTY_PAGE);
-  await page.setContent('<a target=_blank rel=noopener href="/one-style.html">yo</a>');
-  const [popup] = await Promise.all([
-    page.waitForEvent('popup'),
-    page.click('a'),
-  ]);
-  let badSecondPopup = false;
-  page.on('popup', () => badSecondPopup = true);
-  await popup.goto(server.CROSS_PROCESS_PREFIX + '/empty.html');
-  await page.close();
-  expect(badSecondPopup).toBe(false);
-});
-
 it('should report popup opened from iframes', async ({ page, server, browserName }) => {
   await page.goto(server.PREFIX + '/frames/two-frames.html');
-  const frame = page.frame('uno');
+  const frame = page.frames()[1];
   expect(frame).toBeTruthy();
   const [popup] = await Promise.all([
     page.waitForEvent('popup'),

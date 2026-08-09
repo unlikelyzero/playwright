@@ -3,18 +3,18 @@ id: api-testing
 title: "API testing"
 ---
 
+## Introduction
+
 Playwright can be used to get access to the [REST](https://en.wikipedia.org/wiki/Representational_state_transfer) API of
 your application.
 
-Sometimes you may want to send requests to the server directly from Node.js without loading a page and running js code in it.
+Sometimes you may want to send requests to the server directly from Java without loading a page and running js code in it.
 A few examples where it may come in handy:
 - Test your server API.
 - Prepare server side state before visiting the web application in a test.
 - Validate server side post-conditions after running some actions in the browser.
 
 All of that could be achieved via [APIRequestContext] methods.
-
-<!-- TOC -->
 
 ## Writing API Test
 
@@ -194,6 +194,7 @@ public class TestGitHubAPI {
 These tests assume that repository exists. You probably want to create a new one before running tests and delete it afterwards. Use `@BeforeAll` and `@AfterAll` hooks for that.
 
 ```java
+public class TestGitHubAPI {
   // ...
 
   void createTestRepository() {
@@ -223,6 +224,7 @@ These tests assume that repository exists. You probably want to create a new one
     disposeAPIRequestContext();
     closePlaywright();
   }
+}
 ```
 
 ### Complete test example
@@ -373,24 +375,28 @@ public class TestGitHubAPI {
 }
 ```
 
+See experimental [JUnit integration](./junit.md) to automatically initialize Playwright objects and more.
+
 ## Prepare server state via API calls
 
 The following test creates a new issue via API and then navigates to the list of all issues in the
 project to check that it appears at the top of the list. The check is performed using [LocatorAssertions].
 
 ```java
-@Test
-void lastCreatedIssueShouldBeFirstInTheList() {
-  Map<String, String> data = new HashMap<>();
-  data.put("title", "[Feature] request 1");
-  data.put("body", "Feature description");
-  APIResponse newIssue = request.post("/repos/" + USER + "/" + REPO + "/issues",
-    RequestOptions.create().setData(data));
-  assertTrue(newIssue.ok());
+public class TestGitHubAPI {
+  @Test
+  void lastCreatedIssueShouldBeFirstInTheList() {
+    Map<String, String> data = new HashMap<>();
+    data.put("title", "[Feature] request 1");
+    data.put("body", "Feature description");
+    APIResponse newIssue = request.post("/repos/" + USER + "/" + REPO + "/issues",
+      RequestOptions.create().setData(data));
+    assertTrue(newIssue.ok());
 
-  page.navigate("https://github.com/" + USER + "/" + REPO + "/issues");
-  Locator firstIssue = page.locator("a[data-hovercard-type='issue']").first();
-  assertThat(firstIssue).hasText("[Feature] request 1");
+    page.navigate("https://github.com/" + USER + "/" + REPO + "/issues");
+    Locator firstIssue = page.locator("a[data-hovercard-type='issue']").first();
+    assertThat(firstIssue).hasText("[Feature] request 1");
+  }
 }
 ```
 
@@ -400,18 +406,20 @@ The following test creates a new issue via user interface in the browser and the
 it was created:
 
 ```java
-@Test
-void lastCreatedIssueShouldBeOnTheServer() {
-  page.navigate("https://github.com/" + USER + "/" + REPO + "/issues");
-  page.click("text=New Issue");
-  page.fill("[aria-label='Title']", "Bug report 1");
-  page.fill("[aria-label='Comment body']", "Bug description");
-  page.click("text=Submit new issue");
-  String issueId = page.url().substring(page.url().lastIndexOf('/'));
+public class TestGitHubAPI {
+  @Test
+  void lastCreatedIssueShouldBeOnTheServer() {
+    page.navigate("https://github.com/" + USER + "/" + REPO + "/issues");
+    page.locator("text=New Issue").click();
+    page.locator("[aria-label='Title']").fill("Bug report 1");
+    page.locator("[aria-label='Comment body']").fill("Bug description");
+    page.locator("text=Submit new issue").click();
+    String issueId = page.url().substring(page.url().lastIndexOf('/'));
 
-  APIResponse newIssue = request.get("https://github.com/" + USER + "/" + REPO + "/issues/" + issueId);
-  assertThat(newIssue).isOK();
-  assertTrue(newIssue.text().contains("Bug report 1"));
+    APIResponse newIssue = request.get("https://github.com/" + USER + "/" + REPO + "/issues/" + issueId);
+    assertThat(newIssue).isOK();
+    assertTrue(newIssue.text().contains("Bug report 1"));
+  }
 }
 ```
 

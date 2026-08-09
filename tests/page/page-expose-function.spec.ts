@@ -16,9 +16,8 @@
  */
 
 import { test as it, expect } from './pageTest';
-import type { ElementHandle } from 'playwright-core';
 
-it('exposeBinding should work #smoke', async ({ page }) => {
+it('exposeBinding should work @smoke', async ({ page }) => {
   let bindingSource;
   await page.exposeBinding('add', (source, a, b) => {
     bindingSource = source;
@@ -41,6 +40,22 @@ it('should work', async ({ page, server }) => {
     return await window['compute'](9, 4);
   });
   expect(result).toBe(36);
+});
+
+it('should dispose', async ({ page, server }) => {
+  const binding = await page.exposeFunction('compute', function(a, b) {
+    return a * b;
+  });
+  const result = await page.evaluate(async function() {
+    return await window['compute'](9, 4);
+  });
+  expect(result).toBe(36);
+  await binding.dispose();
+
+  const e = await page.evaluate(async function() {
+    return await window['compute'](9, 4);
+  }).catch(e => e);
+  expect(e.message).toContain('is not a function');
 });
 
 it('should work with handles and complex objects', async ({ page, server }) => {
@@ -95,7 +110,7 @@ it('should be callable from-inside addInitScript', async ({ page, server }) => {
   });
   await page.addInitScript(() => window['woof']());
   await page.reload();
-  expect(called).toBe(true);
+  await expect.poll(() => called).toBe(true);
 });
 
 it('should survive navigation', async ({ page, server }) => {
@@ -168,90 +183,10 @@ it('should work with complex objects', async ({ page, server }) => {
   expect(result.x).toBe(7);
 });
 
-it('exposeBindingHandle should work', async ({ page }) => {
-  let target;
-  await page.exposeBinding('logme', (source, t) => {
-    target = t;
-    return 17;
-  }, { handle: true });
-  const result = await page.evaluate(async function() {
-    return window['logme']({ foo: 42 });
-  });
-  expect(await target.evaluate(x => x.foo)).toBe(42);
-  expect(result).toEqual(17);
-});
-
-it('exposeBindingHandle should not throw during navigation', async ({ page, server }) => {
-  await page.exposeBinding('logme', (source, t) => {
-    return 17;
-  }, { handle: true });
-  await page.goto(server.EMPTY_PAGE);
-  await Promise.all([
-    page.evaluate(async url => {
-      window['logme']({ foo: 42 });
-      window.location.href = url;
-    }, server.PREFIX + '/one-style.html'),
-    page.waitForNavigation({ waitUntil: 'load' }),
-  ]);
-});
-
 it('should throw for duplicate registrations', async ({ page }) => {
   await page.exposeFunction('foo', () => {});
   const error = await page.exposeFunction('foo', () => {}).catch(e => e);
   expect(error.message).toContain('page.exposeFunction: Function "foo" has been already registered');
-});
-
-it('exposeBindingHandle should throw for multiple arguments', async ({ page }) => {
-  await page.exposeBinding('logme', (source, t) => {
-    return 17;
-  }, { handle: true });
-  expect(await page.evaluate(async function() {
-    return window['logme']({ foo: 42 });
-  })).toBe(17);
-  expect(await page.evaluate(async function() {
-    return window['logme']({ foo: 42 }, undefined, undefined);
-  })).toBe(17);
-  expect(await page.evaluate(async function() {
-    return window['logme'](undefined, undefined, undefined);
-  })).toBe(17);
-
-  const error = await page.evaluate(async function() {
-    return window['logme'](1, 2);
-  }).catch(e => e);
-  expect(error.message).toContain('exposeBindingHandle supports a single argument, 2 received');
-});
-
-it('should not result in unhandled rejection', async ({ page, isAndroid }) => {
-  it.fixme(isAndroid);
-
-  const closedPromise = page.waitForEvent('close');
-  await page.exposeFunction('foo', async () => {
-    await page.close();
-  });
-  await page.evaluate(() => {
-    setTimeout(() => (window as any).foo(), 0);
-    return undefined;
-  });
-  await closedPromise;
-  // Make a round-trip to be sure we did not throw immediately after closing.
-  expect(await page.evaluate('1 + 1').catch(e => e)).toBeInstanceOf(Error);
-});
-
-it('exposeBinding(handle) should work with element handles', async ({ page }) => {
-  let cb;
-  const promise = new Promise(f => cb = f);
-  await page.exposeBinding('clicked', async (source, element: ElementHandle) => {
-    cb(await element.innerText().catch(e => e));
-  }, { handle: true });
-  await page.goto('about:blank');
-  await page.setContent(`
-    <script>
-      document.addEventListener('click', event => window.clicked(event.target));
-    </script>
-    <div id="a1">Click me</div>
-  `);
-  await page.click('#a1');
-  expect(await promise).toBe('Click me');
 });
 
 it('should work with setContent', async ({ page, server }) => {
@@ -260,4 +195,62 @@ it('should work with setContent', async ({ page, server }) => {
   });
   await page.setContent('<script>window.result = compute(3, 2)</script>');
   expect(await page.evaluate('window.result')).toBe(6);
+});
+
+it('should alias Window, Document and Node', async ({ page }) => {
+  let object: any;
+  await page.exposeBinding('log', (source, obj) => object = obj);
+  await page.evaluate('window.log([window, document, document.body])');
+  expect(object).toEqual(['ref: <Window>', 'ref: <Document>', 'ref: <Node>']);
+});
+
+it('should serialize cycles', async ({ page }) => {
+  let object: any;
+  await page.exposeBinding('log', (source, obj) => object = obj);
+  await page.evaluate('const a = {}; a.b = a; window.log(a)');
+  const a: any = {};
+  a.b = a;
+  expect(object).toEqual(a);
+});
+
+it('should work with overridden console object', async ({ page }) => {
+  await page.evaluate(() => window.console = null);
+  expect(page.evaluate(() => window.console === null)).toBeTruthy();
+  await page.exposeFunction('add', (a, b) => a + b);
+  expect(await page.evaluate('add(5, 6)')).toBe(11);
+});
+
+it('should work with busted Array.prototype.map/push', async ({ page, server }) => {
+  server.setRoute('/test', (req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/html',
+    });
+    res.end(`<script>
+      Array.prototype.map = null;
+      Array.prototype.push = null;
+    </script>`);
+  });
+  await page.goto(server.PREFIX + '/test');
+  await page.exposeFunction('add', (a, b) => a + b);
+  expect(await page.evaluate('add(5, 6)')).toBe(11);
+});
+
+it('should fail with busted Array.prototype.toJSON', async ({ page }) => {
+  await page.evaluateHandle(() => (Array.prototype as any).toJSON = () => '"[]"');
+
+  await page.exposeFunction('add', (a, b) => a + b);
+  await expect(() => page.evaluate(`add(5, 6)`)).rejects.toThrowError('serializedArgs is not an array. This can happen when Array.prototype.toJSON is defined incorrectly');
+
+  expect.soft(await page.evaluate(() => ([] as any).toJSON())).toBe('"[]"');
+});
+
+it('exposeBinding should work in parallel', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/37712' } }, async ({ page }) => {
+  await Promise.all([
+    page.exposeBinding('foo', () => 42),
+    page.exposeBinding('bar', () => 42),
+  ]);
+  await page.evaluate(() => {
+    (window as any).foo();
+    (window as any).bar();
+  });
 });

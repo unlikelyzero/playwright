@@ -18,7 +18,7 @@
 import { attachFrame, detachFrame } from '../config/utils';
 import { test as it, expect } from './pageTest';
 
-it('should work #smoke', async ({ page }) => {
+it('should work @smoke', async ({ page }) => {
   const result = await page.evaluate(() => 7 * 3);
   expect(result).toBe(21);
 });
@@ -94,6 +94,32 @@ it('should transfer arrays as arrays, not objects', async ({ page }) => {
   expect(result).toBe(true);
 });
 
+it('should transfer typed arrays', async ({ page }) => {
+  const testCases = [
+    new Int8Array([1, 2, 3]),
+    new Uint8Array([1, 2, 3]),
+    new Uint8ClampedArray([1, 2, 3]),
+    new Int16Array([1, 2, 3]),
+    new Uint16Array([1, 2, 3]),
+    new Int32Array([1, 2, 3]),
+    new Uint32Array([1, 2, 3]),
+    new Float32Array([1.1, 2.2, 3.3]),
+    new Float64Array([1.1, 2.2, 3.3]),
+    new BigInt64Array([1n, 2n, 3n]),
+    new BigUint64Array([1n, 2n, 3n])
+  ];
+
+  for (const typedArray of testCases) {
+    const result = await page.evaluate(a => a, typedArray);
+    expect(result).toEqual(typedArray);
+  }
+});
+
+it('should transfer bigint', async ({ page }) => {
+  expect(await page.evaluate(() => 42n)).toBe(42n);
+  expect(await page.evaluate(a => a, 17n)).toBe(17n);
+});
+
 it('should transfer maps as empty objects', async ({ page }) => {
   const result = await page.evaluate(a => a.x.constructor.name + ' ' + JSON.stringify(a.x), { x: new Map([[1, 2]]) });
   expect(result).toBe('Object {}');
@@ -133,6 +159,21 @@ it('should work with function shorthands', async ({ page }) => {
 it('should work with unicode chars', async ({ page }) => {
   const result = await page.evaluate(a => a['中文字符'], { '中文字符': 42 });
   expect(result).toBe(42);
+});
+
+it('should work with large strings', async ({ page, isAndroid }) => {
+  it.skip(isAndroid, 'string is too long :(');
+
+  const expected = 'x'.repeat(40000);
+  expect(await page.evaluate(data => data, expected)).toBe(expected);
+});
+
+it('should work with large unicode strings', async ({ page, browserName, platform, isAndroid }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/16367' });
+  it.skip(isAndroid, 'string is too long :(');
+
+  const expected = '🎭'.repeat(10000);
+  expect(await page.evaluate(data => data, expected)).toBe(expected);
 });
 
 it('should throw when evaluation triggers reload', async ({ page }) => {
@@ -330,18 +371,122 @@ it('should properly serialize null fields', async ({ page }) => {
   expect(await page.evaluate(() => ({ a: null }))).toEqual({ a: null });
 });
 
-it('should return undefined for non-serializable objects', async ({ page }) => {
-  expect(await page.evaluate(() => window)).toBe(undefined);
+it('should properly serialize PerformanceMeasure object', async ({ page }) => {
+  expect(await page.evaluate(() => {
+    window.builtins.performance.mark('start');
+    window.builtins.performance.mark('end');
+    window.builtins.performance.measure('my-measure', 'start', 'end');
+    return window.builtins.performance.getEntriesByType('measure');
+  })).toEqual([expect.objectContaining({
+    duration: expect.any(Number),
+    entryType: 'measure',
+    name: 'my-measure',
+    startTime: expect.any(Number),
+  })]);
 });
 
-it('should fail for circular object', async ({ page }) => {
+it('should properly serialize window.performance object', async ({ page }) => {
+  it.skip(!!process.env.PW_CLOCK);
+
+  expect(await page.evaluate(() => performance)).toEqual(expect.objectContaining({
+    'navigation': {
+      'redirectCount': 0,
+      'type': expect.any(Number),
+    },
+    'timeOrigin': expect.any(Number),
+    'timing': {
+      'connectEnd': expect.any(Number),
+      'connectStart': expect.any(Number),
+      'domComplete': expect.any(Number),
+      'domContentLoadedEventEnd': expect.any(Number),
+      'domContentLoadedEventStart': expect.any(Number),
+      'domInteractive': expect.any(Number),
+      'domLoading': expect.any(Number),
+      'domainLookupEnd': expect.any(Number),
+      'domainLookupStart': expect.any(Number),
+      'fetchStart': expect.any(Number),
+      'loadEventEnd': expect.any(Number),
+      'loadEventStart': expect.any(Number),
+      'navigationStart': expect.any(Number),
+      'redirectEnd': expect.any(Number),
+      'redirectStart': expect.any(Number),
+      'requestStart': expect.any(Number),
+      'responseEnd': expect.any(Number),
+      'responseStart': expect.any(Number),
+      'secureConnectionStart': expect.any(Number),
+      'unloadEventEnd': expect.any(Number),
+      'unloadEventStart': expect.any(Number),
+    }
+  }));
+});
+
+it('should return undefined for non-serializable objects', async ({ page }) => {
+  expect(await page.evaluate(() => function() {})).toBe(undefined);
+});
+
+it('should throw for too deep reference chain', {
+  annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/33997' }
+}, async ({ page, browserName, isBidi }) => {
+  it.fixme(browserName === 'firefox' && !isBidi, 'Firefox Juggler -> Playwright serialiser does not throw for deep references.\nThis causes large objects to get serialised back to the Playwright client.\nThere our validators throw \'Maximum call stack size exceeded\'.');
+  await expect(page.evaluate(depth => {
+    const obj = {};
+    let temp = obj;
+    for (let i = 0; i < depth; i++) {
+      temp[i] = {};
+      temp = temp[i];
+    }
+    return obj;
+  }, 1000)).rejects.toThrow('Cannot serialize result: object reference chain is too long.');
+});
+
+it('should throw for too deep reference chain 2', {
+  annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/40940' }
+}, async ({ page, browserName, isAndroid }) => {
+  it.skip(browserName !== 'chromium', 'this is a chromium-only limitation');
+  it.skip(isAndroid, 'something fails there');
+
+  await expect(page.evaluate(depth => {
+    let node = {};
+    for (let i = 0; i < depth; i++)
+      node = { child: node };
+    return node;
+  }, 200)).rejects.toThrow('Cannot serialize result: object reference chain is too long.');
+});
+
+it('should throw usable message for unserializable shallow function', async ({ page }) => {
+  await expect(() => page.evaluate(arg => arg, () => { }))
+      .rejects.toThrow(/Attempting to serialize unexpected value: \(\) => {}/);
+});
+
+it('should throw usable message for unserializable object one deep function', async ({ page }) => {
+  await expect(() => page.evaluate(arg => arg, { aProperty: () => { } }))
+      .rejects.toThrow(/Attempting to serialize unexpected value at position "aProperty": \(\) => {}/);
+});
+
+it('should throw usable message for unserializable object nested function', async ({ page }) => {
+  await expect(() => page.evaluate(arg => arg, { a: { inner: { property: () => { } } } }))
+      .rejects.toThrow(/Attempting to serialize unexpected value at position "a\.inner\.property": \(\) => {}/);
+});
+
+it('should throw usable message for unserializable array nested function', async ({ page }) => {
+  await expect(() => page.evaluate(arg => arg, { a: { inner: ['firstValue', { property: () => { } }] } }))
+      .rejects.toThrow(/Attempting to serialize unexpected value at position "a\.inner\[1\]\.property": \(\) => {}/);
+});
+
+it('should alias Window, Document and Node', async ({ page }) => {
+  const object = await page.evaluate('[window, document, document.body]');
+  expect(object).toEqual(['ref: <Window>', 'ref: <Document>', 'ref: <Node>']);
+});
+
+it('should work for circular object', async ({ page }) => {
   const result = await page.evaluate(() => {
     const a = {} as any;
-    const b = { a };
-    a.b = b;
+    a.b = a;
     return a;
   });
-  expect(result).toBe(undefined);
+  const a = {} as any;
+  a.b = a;
+  expect(result).toEqual(a);
 });
 
 it('should be able to throw a tricky error', async ({ page }) => {
@@ -382,7 +527,7 @@ it('should throw if underlying element was disposed', async ({ page }) => {
   await element.dispose();
   let error = null;
   await page.evaluate(e => e.textContent, element).catch(e => error = e);
-  expect(error.message).toContain('JSHandle is disposed');
+  expect(error.message).toContain('no object with guid');
 });
 
 it('should simulate a user gesture', async ({ page }) => {
@@ -417,7 +562,7 @@ it('should not throw an error when evaluation does a navigation', async ({ page,
 });
 
 it('should not throw an error when evaluation does a synchronous navigation and returns an object', async ({ page, server, browserName }) => {
-  // It is imporant to be on about:blank for sync reload.
+  // It is important to be on about:blank for sync reload.
   const result = await page.evaluate(() => {
     window.location.reload();
     return { a: 42 };
@@ -426,7 +571,7 @@ it('should not throw an error when evaluation does a synchronous navigation and 
 });
 
 it('should not throw an error when evaluation does a synchronous navigation and returns undefined', async ({ page }) => {
-  // It is imporant to be on about:blank for sync reload.
+  // It is important to be on about:blank for sync reload.
   const result = await page.evaluate(() => {
     window.location.reload();
     return undefined;
@@ -493,7 +638,7 @@ it('should respect use strict expression', async ({ page }) => {
 });
 
 it('should not leak utility script', async function({ page }) {
-  expect(await page.evaluate(() => this === window)).toBe(true);
+  expect(await page.evaluate('this === window')).toBe(true);
 });
 
 it('should not leak handles', async ({ page }) => {
@@ -513,13 +658,37 @@ it('should evaluate exception with a function on the stack', async ({ page }) =>
       return new Error('error message');
     })();
   });
-  expect(error).toContain('Error: error message');
-  expect(error).toContain('functionOnStack');
+  expect(error.message).toBe('error message');
+  expect(error.stack).toContain('functionOnStack');
 });
 
 it('should evaluate exception', async ({ page }) => {
-  const error = await page.evaluate(`new Error('error message')`);
-  expect(error).toContain('Error: error message');
+  const error = await page.evaluate(() => {
+    function innerFunction() {
+      const e = new Error('error message');
+      e.name = 'foobar';
+      return e;
+    }
+    return innerFunction();
+  });
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toBe('error message');
+  expect((error as Error).name).toBe('foobar');
+  expect((error as Error).stack).toContain('innerFunction');
+});
+
+it('should pass exception argument', async ({ page }) => {
+  function innerFunction() {
+    const e = new Error('error message');
+    e.name = 'foobar';
+    return e;
+  }
+  const received = await page.evaluate(e => {
+    return { message: e.message, name: e.name, stack: e.stack };
+  }, innerFunction());
+  expect(received.message).toBe('error message');
+  expect(received.name).toBe('foobar');
+  expect(received.stack).toContain('innerFunction');
 });
 
 it('should evaluate date', async ({ page }) => {
@@ -544,6 +713,22 @@ it('should jsonValue() date', async ({ page }) => {
   expect(await resultHandle.jsonValue()).toEqual({ date: new Date('2020-05-27T01:31:38.506Z') });
 });
 
+it('should evaluate url', async ({ page }) => {
+  const result = await page.evaluate(() => ({ url: new URL('https://example.com') }));
+  expect(result).toEqual({ url: new URL('https://example.com') });
+});
+
+it('should roundtrip url', async ({ page }) => {
+  const url = new URL('https://example.com');
+  const result = await page.evaluate(url => url, url);
+  expect(result.toString()).toEqual(url.toString());
+});
+
+it('should jsonValue() url', async ({ page }) => {
+  const resultHandle = await page.evaluateHandle(() => ({ url: new URL('https://example.com') }));
+  expect(await resultHandle.jsonValue()).toEqual({ url: new URL('https://example.com') });
+});
+
 it('should not use toJSON when evaluating', async ({ page }) => {
   const result = await page.evaluate(() => ({ toJSON: () => 'string', data: 'data' }));
   expect(result).toEqual({ data: 'data', toJSON: {} });
@@ -554,7 +739,7 @@ it('should not use Array.prototype.toJSON when evaluating', async ({ page }) => 
     (Array.prototype as any).toJSON = () => 'busted';
     return [1, 2, 3];
   });
-  expect(result).toEqual([1,2,3]);
+  expect(result).toEqual([1, 2, 3]);
 });
 
 it('should not add a toJSON property to newly created Arrays after evaluation', async ({ page, browserName }) => {
@@ -566,6 +751,23 @@ it('should not add a toJSON property to newly created Arrays after evaluation', 
 it('should not use toJSON in jsonValue', async ({ page }) => {
   const resultHandle = await page.evaluateHandle(() => ({ toJSON: () => 'string', data: 'data' }));
   expect(await resultHandle.jsonValue()).toEqual({ data: 'data', toJSON: {} });
+});
+
+it('should ignore buggy toJSON', async ({ page }) => {
+  const result = await page.evaluate(() => {
+    class Foo {
+      toJSON() {
+        throw new Error('Bad');
+      }
+    }
+    class Bar {
+      get toJSON() {
+        throw new Error('Also bad');
+      }
+    }
+    return { foo: new Foo(), bar: new Bar() };
+  });
+  expect(result).toEqual({ foo: {}, bar: {} });
 });
 
 it('should not expose the injected script export', async ({ page }) => {
@@ -580,4 +782,111 @@ it('should throw when frame is detached', async ({ page, server }) => {
   const error = await promise;
   expect(error).toBeTruthy();
   expect(error.message).toMatch(/frame.evaluate: (Frame was detached|Execution context was destroyed)/);
+});
+
+it('should work with overridden Object.defineProperty', async ({ page, server }) => {
+  server.setRoute('/test', (req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/html',
+    });
+    res.end(`<script>
+    Object.create = null;
+    Object.defineProperty = null;
+    Object.getOwnPropertyDescriptor = null;
+    Object.getOwnPropertyNames = null;
+    Object.getPrototypeOf = null;
+    Object.prototype.hasOwnProperty = null;
+    </script>`);
+  });
+  await page.goto(server.PREFIX + '/test');
+  expect(await page.evaluate('1+2')).toBe(3);
+});
+
+it('should work with busted Array.prototype.map/push', async ({ page, server }) => {
+  server.setRoute('/test', (req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/html',
+    });
+    res.end(`<script>
+      Array.prototype.map = null;
+      Array.prototype.push = null;
+    </script>`);
+  });
+  await page.goto(server.PREFIX + '/test');
+  expect(await page.evaluate('1+2')).toBe(3);
+  expect(await ((await page.evaluateHandle('1+2')).jsonValue())).toBe(3);
+});
+
+it('should work with overridden globalThis.Window/Document/Node', async ({ page, server }) => {
+  const testCases = [
+    // @ts-ignore
+    () => globalThis.Window = {},
+    // @ts-ignore
+    () => globalThis.Document = {},
+    // @ts-ignore
+    () => globalThis.Node = {},
+    () => globalThis.Window = null,
+    () => globalThis.Document = null,
+    () => globalThis.Node = null,
+  ];
+  for (const testCase of testCases) {
+    await it.step(testCase.toString(), async () => {
+      await page.goto(server.EMPTY_PAGE);
+      await page.evaluate(testCase);
+      expect(await page.evaluate('1+2')).toBe(3);
+      expect(await page.evaluate(() => ['foo'])).toEqual(['foo']);
+    });
+  }
+});
+
+it('should work with overridden URL/Date/RegExp', async ({ page, server }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/21109' });
+  const testCases = [
+    // @ts-ignore
+    () => globalThis.URL = 'foo',
+    // @ts-ignore
+    () => globalThis.RegExp = 'foo',
+    // @ts-ignore
+    () => globalThis.Date = 'foo',
+  ];
+  for (const testCase of testCases) {
+    await it.step(testCase.toString(), async () => {
+      await page.goto(server.EMPTY_PAGE);
+      await page.evaluate(testCase);
+      expect(await page.evaluate('1+2')).toBe(3);
+      expect(await page.evaluate(() => ({ 'a': 2023 }))).toEqual({ 'a': 2023 });
+    });
+  }
+});
+
+it('should work with Array.from/map', async ({ page }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/28520' });
+  expect(await page.evaluate(() => {
+    const r = (str, amount) => Array.from(Array(amount)).map(() => str).join('');
+    return r('([a-f0-9]{2})', 3);
+  })).toBe('([a-f0-9]{2})([a-f0-9]{2})([a-f0-9]{2})');
+});
+
+it('should work with a using declaration', async ({ page, nodeVersion, browserName }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/41511' });
+  it.skip(nodeVersion.major < 24, 'using is lowered to a module-scope helper that does not survive evaluate serialization on Node < 24');
+  it.skip(browserName === 'webkit', 'WebKit does not support using declarations');
+  const disposed = await page.evaluate(() => {
+    let disposed = false;
+    {
+      using r = { [Symbol.dispose]: () => { disposed = true; } };
+      void r;
+    }
+    return disposed;
+  });
+  expect(disposed).toBe(true);
+});
+
+it('should ignore dangerous object keys', async ({ page }) => {
+  const input = {
+    __proto__: { polluted: true },
+    safeKey: 'safeValue'
+  };
+  const result = await page.evaluate(arg => arg, input);
+  expect(result).toEqual({ safeKey: 'safeValue' });
 });

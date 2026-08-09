@@ -15,7 +15,7 @@
  */
 
 import type { Page, ViewportSize } from 'playwright-core';
-import { VideoMode } from '@playwright/test';
+import type { PageScreenshotOptions, ScreenshotMode, VideoMode } from '@playwright/test';
 export { expect } from '@playwright/test';
 
 // Page test does not guarantee an isolated context, just a new page (because Android).
@@ -25,12 +25,17 @@ export type PageTestFixtures = {
 
 export type PageWorkerFixtures = {
   headless: boolean;
-  channel: string;
-  trace: 'off' | 'on' | 'retain-on-failure' | 'on-first-retry' | /** deprecated */ 'retry-with-trace';
+  channel: string | undefined;
+  screenshot: ScreenshotMode | { mode: ScreenshotMode } & Pick<PageScreenshotOptions, 'fullPage' | 'omitBackground'>;
+  trace: 'off' | 'on' | 'retain-on-failure' | 'on-first-retry' | 'retain-on-first-failure' | 'on-all-retries' | /** deprecated */ 'retry-with-trace';
   video: VideoMode | { mode: VideoMode, size: ViewportSize };
   browserName: 'chromium' | 'firefox' | 'webkit';
   browserVersion: string;
   browserMajorVersion: number;
+  electronMajorVersion: number;
+  isBidi: boolean;
   isAndroid: boolean;
   isElectron: boolean;
+  isHeadlessShell: boolean;
+  isFrozenWebkit: boolean;
 };

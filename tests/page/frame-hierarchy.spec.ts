@@ -20,7 +20,7 @@ import { attachFrame, detachFrame } from '../config/utils';
 import type { Frame } from 'playwright-core';
 
 function dumpFrames(frame: Frame, indentation: string = ''): string[] {
-  let description = frame.url().replace(/:\d+\//, ':<PORT>/');
+  let description = frame.url();
   if (frame.name())
     description += ' (' + frame.name() + ')';
   const result = [indentation + description];
@@ -35,16 +35,17 @@ function dumpFrames(frame: Frame, indentation: string = ''): string[] {
   return result;
 }
 
-it('should handle nested frames #smoke', async ({ page, server, isAndroid }) => {
+it('should handle nested frames @smoke', async ({ page, server, isAndroid, isBidi }) => {
   it.skip(isAndroid, 'No cross-process on Android');
+  it.skip(isBidi, 'frame.name() is racy with BiDi');
 
   await page.goto(server.PREFIX + '/frames/nested-frames.html');
   expect(dumpFrames(page.mainFrame())).toEqual([
-    'http://localhost:<PORT>/frames/nested-frames.html',
-    '    http://localhost:<PORT>/frames/frame.html (aframe)',
-    '    http://localhost:<PORT>/frames/two-frames.html (2frames)',
-    '        http://localhost:<PORT>/frames/frame.html (dos)',
-    '        http://localhost:<PORT>/frames/frame.html (uno)',
+    `${server.PREFIX}/frames/nested-frames.html`,
+    `    ${server.PREFIX}/frames/frame.html (aframe)`,
+    `    ${server.PREFIX}/frames/two-frames.html (2frames)`,
+    `        ${server.PREFIX}/frames/frame.html (dos)`,
+    `        ${server.PREFIX}/frames/frame.html (uno)`,
   ]);
 });
 
@@ -154,8 +155,8 @@ it('should report frame from-inside shadow DOM', async ({ page, server }) => {
   expect(page.frames()[1].url()).toBe(server.EMPTY_PAGE);
 });
 
-it('should report frame.name()', async ({ page, server, isElectron }) => {
-  it.fixme(isElectron);
+it('should report frame.name()', async ({ page, server, isBidi }) => {
+  it.skip(isBidi, 'frame.name() is racy with BiDi');
 
   await attachFrame(page, 'theFrameId', server.EMPTY_PAGE);
   await page.evaluate(url => {
@@ -178,8 +179,7 @@ it('should report frame.parent()', async ({ page, server }) => {
   expect(page.frames()[2].parentFrame()).toBe(page.mainFrame());
 });
 
-it('should report different frame instance when frame re-attaches', async ({ page, server, isElectron }) => {
-  it.fixme(isElectron);
+it('should report different frame instance when frame re-attaches', async ({ page, server }) => {
 
   const frame1 = await attachFrame(page, 'frame1', server.EMPTY_PAGE);
   await page.evaluate(() => {
@@ -196,7 +196,7 @@ it('should report different frame instance when frame re-attaches', async ({ pag
 });
 
 it('should refuse to display x-frame-options:deny iframe', async ({ page, server, browserName }) => {
-  it.fixme(browserName === 'firefox');
+  it.skip(browserName === 'firefox');
 
   server.setRoute('/x-frame-options-deny.html', async (req, res) => {
     res.setHeader('Content-Type', 'text/html');
